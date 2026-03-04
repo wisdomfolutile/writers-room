@@ -2,6 +2,10 @@
 .env
 index/
 
+# py2app build output
+build/
+dist/
+
 # Python
 __pycache__/
 *.pyc

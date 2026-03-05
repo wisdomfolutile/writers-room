@@ -42,7 +42,7 @@ def load_index() -> tuple[np.ndarray, list[dict]]:
                 "Index not found. Run: python3 indexer.py"
             )
         _embeddings = np.load(EMBEDDINGS_FILE)
-        with open(METADATA_FILE) as f:
+        with open(METADATA_FILE, encoding='utf-8') as f:
             _metadata = json.load(f)
     return _embeddings, _metadata
 

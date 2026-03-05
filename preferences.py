@@ -24,7 +24,7 @@ from AppKit import (
     NSMiniaturizableWindowMask,
     NSObject,
     NSSegmentedControl,
-    NSSegmentedStyleRounded,
+    NSSegmentStyleRounded,
     NSStepper,
     NSTitledWindowMask,
     NSTextField,
@@ -32,7 +32,7 @@ from AppKit import (
     NSWindow,
     NSWindowController,
 )
-from Foundation import NSMakeSize
+from utils import call_on_main
 
 PREFS_PATH = Path.home() / ".config" / "writers-room" / "prefs.json"
 
@@ -170,20 +170,6 @@ def _make_label(text: str, x: float, y: float, w: float = 160, h: float = 20) ->
 
 class PreferencesWindowController(NSWindowController):
 
-    @classmethod
-    def create(cls, prefs: "Preferences", searcher) -> "PreferencesWindowController":
-        """Factory — call this instead of alloc().init()."""
-        controller = cls.alloc().init()
-        controller._prefs    = prefs
-        controller._searcher = searcher
-        controller._status_label: NSTextField | None = None
-        controller._stepper:  NSStepper | None = None
-        controller._count_label: NSTextField | None = None
-        controller._mode_control: NSSegmentedControl | None = None
-        controller._login_checkbox: NSButton | None = None
-        controller._build_window()
-        return controller
-
     def _build_window(self) -> None:
         W, H = 380, 280
         style = (
@@ -233,7 +219,7 @@ class PreferencesWindowController(NSWindowController):
         self._mode_control.setSegmentCount_(3)
         for i, label in enumerate(_MODE_LABELS):
             self._mode_control.setLabel_forSegment_(label, i)
-        self._mode_control.setSegmentStyle_(NSSegmentedStyleRounded)
+        self._mode_control.setSegmentStyle_(NSSegmentStyleRounded)
         self._mode_control.setSelectedSegment_(_MODE_KEYS.index(self._prefs.default_mode))
         content.addSubview_(self._mode_control)
 
@@ -293,9 +279,9 @@ class PreferencesWindowController(NSWindowController):
             )
             if result.returncode == 0:
                 n = self._searcher.reload_index()
-                objc.callAfter(self._status_label.setStringValue_, f"Done — {n} notes")
+                call_on_main(lambda: self._status_label.setStringValue_(f"Done — {n} notes"))
             else:
-                objc.callAfter(self._status_label.setStringValue_, "Error — check terminal")
+                call_on_main(lambda: self._status_label.setStringValue_("Error — check terminal"))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -310,3 +296,17 @@ class PreferencesWindowController(NSWindowController):
         self.showWindow_(None)
         self.window().makeKeyAndOrderFront_(None)
         NSApp.activateIgnoringOtherApps_(True)
+
+
+# Module-level factory — avoids PyObjC intercepting classmethods on NSObject subclasses
+def make_prefs_controller(prefs: Preferences, searcher) -> PreferencesWindowController:
+    controller = PreferencesWindowController.alloc().init()
+    controller._prefs          = prefs
+    controller._searcher       = searcher
+    controller._status_label   = None
+    controller._stepper        = None
+    controller._count_label    = None
+    controller._mode_control   = None
+    controller._login_checkbox = None
+    controller._build_window()
+    return controller

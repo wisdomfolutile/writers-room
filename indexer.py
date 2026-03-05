@@ -37,7 +37,7 @@ client = OpenAI()
 def load_index() -> tuple[np.ndarray, list[dict]]:
     if EMBEDDINGS_FILE.exists() and METADATA_FILE.exists():
         embeddings = np.load(EMBEDDINGS_FILE)
-        with open(METADATA_FILE) as f:
+        with open(METADATA_FILE, encoding='utf-8') as f:
             metadata = json.load(f)
         return embeddings, metadata
     return np.array([]).reshape(0, 0), []
@@ -46,7 +46,7 @@ def load_index() -> tuple[np.ndarray, list[dict]]:
 def save_index(embeddings: np.ndarray, metadata: list[dict]) -> None:
     INDEX_DIR.mkdir(exist_ok=True)
     np.save(EMBEDDINGS_FILE, embeddings)
-    with open(METADATA_FILE, "w") as f:
+    with open(METADATA_FILE, "w", encoding='utf-8') as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
 
 

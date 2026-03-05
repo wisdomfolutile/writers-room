@@ -52,14 +52,14 @@ class NotesSearcher:
                 f"Index not found at {EMBEDDINGS_FILE}. Run: python3 indexer.py"
             )
         self._embeddings = np.load(EMBEDDINGS_FILE)
-        with open(METADATA_FILE) as f:
+        with open(METADATA_FILE, encoding='utf-8') as f:
             self._metadata = json.load(f)
         self._client = OpenAI()
 
     def reload_index(self) -> int:
         """Re-load from disk after re-indexing. Returns new note count."""
         self._embeddings = np.load(EMBEDDINGS_FILE)
-        with open(METADATA_FILE) as f:
+        with open(METADATA_FILE, encoding='utf-8') as f:
             self._metadata = json.load(f)
         # Clear embedding cache — stale after re-index (content may have changed)
         self._cache.clear()

@@ -143,6 +143,47 @@ OPEN_BTN_X = PANEL_W - INNER_PAD - OPEN_BTN_W  # = 582
 
 
 # ---------------------------------------------------------------------------
+# AppleScript string helper — handles embedded double quotes via & quote &
+# ---------------------------------------------------------------------------
+
+def _as_string_lit(s: str) -> str:
+    """
+    Return an AppleScript string literal that safely embeds s.
+    AppleScript has no backslash escaping; embedded " must be built via & quote &.
+    e.g. _as_string_lit('It "works"') → '"It " & quote & "works" & quote & ""'
+    """
+    parts = s.split('"')
+    if len(parts) == 1:
+        return f'"{s}"'
+    return ' & quote & '.join(f'"{p}"' for p in parts)
+
+
+# ---------------------------------------------------------------------------
+# CP1252 display fixer — corrects mojibake in legacy note content
+# ---------------------------------------------------------------------------
+
+def _fix_cp1252(s: str) -> str:
+    """
+    Bytes 0x80–0x9F are Windows-1252 printable chars (curly quotes, bullet, em-dash…)
+    but Unicode control chars. Notes content from older imports stores them as
+    those literal codepoints. Map them to their intended characters for display.
+    """
+    if not s or not any(0x80 <= ord(c) <= 0x9F for c in s):
+        return s  # fast path
+    out = []
+    for ch in s:
+        cp = ord(ch)
+        if 0x80 <= cp <= 0x9F:
+            try:
+                out.append(bytes([cp]).decode('cp1252'))
+            except (UnicodeDecodeError, ValueError):
+                out.append(ch)
+        else:
+            out.append(ch)
+    return ''.join(out)
+
+
+# ---------------------------------------------------------------------------
 # Claude brand accent — #E97133 (warm orange)
 # ---------------------------------------------------------------------------
 
@@ -173,7 +214,7 @@ class _FolderChip(NSView):
         self._label.setEditable_(False)
         self._label.setBordered_(False)
         self._label.setDrawsBackground_(False)
-        self._label.setFont_(NSFont.monospacedSystemFontOfSize_(10, 0))
+        self._label.setFont_(NSFont.monospacedSystemFontOfSize_weight_(10, 0))
         self._label.setTextColor_(NSColor.secondaryLabelColor())
         self._label.setAlignment_(1)   # NSTextAlignmentCenter
         self._label.setLineBreakMode_(3)
@@ -247,13 +288,13 @@ def _make_answer_attr_string(text: str, secondary: bool = False) -> NSMutableAtt
             chunk = NSAttributedString.alloc().initWithString_attributes_(before, base_attrs)
             result.appendAttributedString_(chunk)
 
-        # Note title as a Claude-style orange code chip + clickable link
+        # Note title as a code chip — neutral bg + SF Mono + orange text (clickable)
         note_title = m.group(1)
         url = NSURL.URLWithString_(f"writersroom://{quote(note_title)}")
         link_attrs: dict = {
-            NSFontAttributeName: NSFont.systemFontOfSize_weight_(13, 0.3),
+            NSFontAttributeName: NSFont.monospacedSystemFontOfSize_weight_(12, 0.0),
             NSForegroundColorAttributeName: _accent(),
-            NSBackgroundColorAttributeName: _accent().colorWithAlphaComponent_(0.12),
+            NSBackgroundColorAttributeName: NSColor.labelColor().colorWithAlphaComponent_(0.08),
             NSLinkAttributeName: url,
             NSParagraphStyleAttributeName: para,
         }
@@ -444,9 +485,9 @@ class _ResultCell(NSView):
 
     def setResult_(self, result: dict) -> None:
         self._result = result
-        self._title.setStringValue_(result.get("title", ""))
+        self._title.setStringValue_(_fix_cp1252(result.get("title", "")))
         self._folder.setFolder_(result.get("folder", ""))
-        self._snippet.setStringValue_(result.get("snippet", ""))
+        self._snippet.setStringValue_(_fix_cp1252(result.get("snippet", "")))
 
     @objc.IBAction
     def openInNotesFromButton_(self, sender) -> None:
@@ -799,10 +840,26 @@ class SearchPanel:
         self._answer_view.textStorage().setAttributedString_(attr_str)
 
     def _open_note_by_title(self, title: str) -> None:
-        """Open a note by title — used when user clicks a [[link]] in the synthesis."""
-        for result in self._data_source.results():
-            if result["title"] == title:
-                self._open_note(result)
+        """Open a note by title — used when user clicks a [[link]] in the synthesis.
+        The AI may not reproduce the exact title, so we fall back to fuzzy matching.
+        """
+        results = self._data_source.results()
+        t = title.strip().lower()
+        # 1. Exact match
+        for r in results:
+            if r["title"] == title:
+                self._open_note(r)
+                return
+        # 2. Case-insensitive exact
+        for r in results:
+            if r["title"].strip().lower() == t:
+                self._open_note(r)
+                return
+        # 3. Partial — AI may have abbreviated or paraphrased the title
+        for r in results:
+            rt = r["title"].strip().lower()
+            if t in rt or rt in t:
+                self._open_note(r)
                 return
 
     # ------------------------------------------------------------------
@@ -815,10 +872,10 @@ class SearchPanel:
             self._open_note(results[0])
 
     def _open_note(self, result: dict) -> None:
-        title  = result["title"].replace("\\", "\\\\").replace('"', '\\"')
-        folder = result["folder"].replace("\\", "\\\\").replace('"', '\\"')
+        title_as  = _as_string_lit(result["title"])
+        folder_as = _as_string_lit(result["folder"])
         script = (
             f'tell application "Notes" '
-            f'to show (first note of folder "{folder}" whose name is "{title}")'
+            f'to show (first note of folder {folder_as} whose name is {title_as})'
         )
         subprocess.Popen(["osascript", "-e", script])

@@ -33,6 +33,7 @@ from AppKit import (
     NSApp,
     NSAttributedString,
     NSBackingStoreBuffered,
+    NSBezierPath,
     NSButton,
     NSBox,
     NSBoxSeparator,
@@ -40,13 +41,16 @@ from AppKit import (
     NSFont,
     NSFontAttributeName,
     NSForegroundColorAttributeName,
+    NSBackgroundColorAttributeName,
     NSImage,
     NSImageView,
     NSLinkAttributeName,
     NSMakeRect,
     NSMutableAttributedString,
+    NSMutableParagraphStyle,
     NSObject,
     NSPanel,
+    NSParagraphStyleAttributeName,
     NSScrollView,
     NSSegmentedControl,
     NSSegmentStyleCapsule,
@@ -54,7 +58,6 @@ from AppKit import (
     NSTableView,
     NSTextField,
     NSTextView,
-    NSUnderlineStyleAttributeName,
     NSView,
     NSVisualEffectBlendingModeBehindWindow,
     NSVisualEffectView,
@@ -103,7 +106,7 @@ SEP_H     = 1           # separator below search bar
 ANSWER_H  = 130         # synthesis text area
 SEP2_H    = 1           # separator between synthesis and results
 ROW_H     = 64.0        # result row height
-CORNER_R  = 14.0        # panel corner radius
+CORNER_R  = 16.0        # panel corner radius
 
 # Total height: search bar + answer area + 5 result rows + small footer
 PANEL_H = SEARCH_H + SEP_H + ANSWER_H + SEP2_H + int(ROW_H * 5) + 8  # = 516
@@ -140,6 +143,58 @@ OPEN_BTN_X = PANEL_W - INNER_PAD - OPEN_BTN_W  # = 582
 
 
 # ---------------------------------------------------------------------------
+# Claude brand accent — #E97133 (warm orange)
+# ---------------------------------------------------------------------------
+
+def _accent() -> NSColor:
+    """Claude orange. Used for interactive elements and note reference chips."""
+    return NSColor.colorWithSRGBRed_green_blue_alpha_(0.914, 0.443, 0.200, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Folder chip — code-chip style (monospace + subtle rounded background)
+# ---------------------------------------------------------------------------
+
+class _FolderChip(NSView):
+    """
+    A folder name rendered as an inline code chip — like Claude's `server.py`
+    inline code style: SF Mono, subtle rounded-rect background that adapts
+    to light/dark mode via drawRect_ (no layer CGColor dance needed).
+    """
+
+    def initWithFrame_(self, frame):
+        self = objc.super(_FolderChip, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        W, H = frame.size.width, frame.size.height
+        self._label = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(6, 2, W - 12, H - 4)
+        )
+        self._label.setEditable_(False)
+        self._label.setBordered_(False)
+        self._label.setDrawsBackground_(False)
+        self._label.setFont_(NSFont.monospacedSystemFontOfSize_(10, 0))
+        self._label.setTextColor_(NSColor.secondaryLabelColor())
+        self._label.setAlignment_(1)   # NSTextAlignmentCenter
+        self._label.setLineBreakMode_(3)
+        self.addSubview_(self._label)
+        return self
+
+    def drawRect_(self, rect) -> None:
+        NSColor.labelColor().colorWithAlphaComponent_(0.07).set()
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            self.bounds(), 5.0, 5.0
+        ).fill()
+
+    def setFolder_(self, name: str) -> None:
+        self._label.setStringValue_(name)
+
+
+def _make_folder_chip(x: float, y: float, w: float, h: float) -> _FolderChip:
+    return _FolderChip.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
+
+
+# ---------------------------------------------------------------------------
 # Helper — non-editable transparent label
 # ---------------------------------------------------------------------------
 
@@ -165,18 +220,23 @@ def _make_answer_attr_string(text: str, secondary: bool = False) -> NSMutableAtt
     """
     Parse [[Note Title]] patterns from synthesis text and build an
     NSMutableAttributedString where:
-    - plain text: system 13pt in labelColor / secondaryLabelColor
-    - [[Note Title]] → note title in teal, underlined, with an NSURL link
-      so the NSTextView delegate can intercept clicks
+    - plain text: system 14pt in labelColor / secondaryLabelColor, 4pt line spacing
+    - [[Note Title]] → Claude-style orange chip: accent text + 12% orange background fill,
+      clickable via NSLinkAttributeName so _AnswerDelegate can intercept
     """
     base_color = NSColor.secondaryLabelColor() if secondary else NSColor.labelColor()
-    base_font  = NSFont.systemFontOfSize_(13)
+    base_font  = NSFont.systemFontOfSize_(14)
+
+    # Line spacing shared across all paragraphs — Claude-like breathing room
+    para = NSMutableParagraphStyle.alloc().init()
+    para.setLineSpacing_(4.0)
 
     result = NSMutableAttributedString.alloc().initWithString_("")
 
     base_attrs: dict = {
         NSFontAttributeName: base_font,
         NSForegroundColorAttributeName: base_color,
+        NSParagraphStyleAttributeName: para,
     }
 
     pos = 0
@@ -187,14 +247,15 @@ def _make_answer_attr_string(text: str, secondary: bool = False) -> NSMutableAtt
             chunk = NSAttributedString.alloc().initWithString_attributes_(before, base_attrs)
             result.appendAttributedString_(chunk)
 
-        # Note title as a clickable link
+        # Note title as a Claude-style orange code chip + clickable link
         note_title = m.group(1)
         url = NSURL.URLWithString_(f"writersroom://{quote(note_title)}")
         link_attrs: dict = {
-            NSFontAttributeName: NSFont.systemFontOfSize_(13),
-            NSForegroundColorAttributeName: NSColor.systemTealColor(),
+            NSFontAttributeName: NSFont.systemFontOfSize_weight_(13, 0.3),
+            NSForegroundColorAttributeName: _accent(),
+            NSBackgroundColorAttributeName: _accent().colorWithAlphaComponent_(0.12),
             NSLinkAttributeName: url,
-            NSUnderlineStyleAttributeName: 1,  # NSUnderlineStyleSingle
+            NSParagraphStyleAttributeName: para,
         }
         linked = NSAttributedString.alloc().initWithString_attributes_(note_title, link_attrs)
         result.appendAttributedString_(linked)
@@ -349,13 +410,10 @@ class _ResultCell(NSView):
         self._title.setFont_(_TITLE_FONT)
         self.addSubview_(self._title)
 
-        # ── Folder chip — right of title, left of ↗ button
+        # ── Folder chip — code-chip style, right of title, left of ↗ button
         # x = OPEN_BTN_X - FOLDER_W - 8 = 582 - 100 - 8 = 474
-        self._folder = _label(
-            "", 474, ROW_H - 28, FOLDER_W, 19,
-            size=11, color=NSColor.tertiaryLabelColor(),
-        )
-        self._folder.setAlignment_(2)  # NSTextAlignmentRight
+        # Height 22 so the chip has 2px padding above/below the 18px text baseline
+        self._folder = _make_folder_chip(474, ROW_H - 30, FOLDER_W, 22)
         self.addSubview_(self._folder)
 
         # ── Snippet — below title, full width minus padding
@@ -377,7 +435,7 @@ class _ResultCell(NSView):
             self._open_btn.setImage_(sf_img)
         self._open_btn.setBezelStyle_(0)          # borderless
         self._open_btn.setBordered_(False)
-        self._open_btn.setContentTintColor_(NSColor.tertiaryLabelColor())
+        self._open_btn.setContentTintColor_(_accent())
         self._open_btn.setTarget_(self)
         self._open_btn.setAction_("openInNotesFromButton_")
         self.addSubview_(self._open_btn)
@@ -387,7 +445,7 @@ class _ResultCell(NSView):
     def setResult_(self, result: dict) -> None:
         self._result = result
         self._title.setStringValue_(result.get("title", ""))
-        self._folder.setStringValue_(result.get("folder", ""))
+        self._folder.setFolder_(result.get("folder", ""))
         self._snippet.setStringValue_(result.get("snippet", ""))
 
     @objc.IBAction
@@ -711,7 +769,7 @@ class SearchPanel:
             self._set_answer("No notes found for this query.", secondary=True)
             return
 
-        self._set_answer("Thinking…", secondary=True)
+        self._set_answer("✦  Thinking…", secondary=True)
 
         def on_chunk(text: str) -> None:
             if gen != self._syn_id:

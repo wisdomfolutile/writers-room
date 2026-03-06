@@ -81,6 +81,25 @@ class _KeyablePanel(NSPanel):
 
 
 # ---------------------------------------------------------------------------
+# Window resign-key observer — drives "hide on click away" mode
+# ---------------------------------------------------------------------------
+
+class _WindowObserver(NSObject):
+    """Receives NSWindowDidResignKeyNotification; calls _callback if set."""
+
+    def init(self):
+        self = objc.super(_WindowObserver, self).init()
+        if self is None:
+            return None
+        self._callback = None
+        return self
+
+    def handleResignKey_(self, notification) -> None:
+        if self._callback:
+            self._callback()
+
+
+# ---------------------------------------------------------------------------
 # Visual effect material
 # ---------------------------------------------------------------------------
 
@@ -518,6 +537,7 @@ class SearchPanel:
         self._current_mode:   str                  = prefs.default_mode
         self._debounce_timer: threading.Timer | None = None
         self._syn_id:         int = 0              # generation counter for synthesis cancellation
+        self._win_observer:   _WindowObserver | None = None
 
         self._build()
 
@@ -537,6 +557,16 @@ class SearchPanel:
         self._panel.setOpaque_(False)
         self._panel.setBackgroundColor_(NSColor.clearColor())
         self._panel.center()
+
+        # Register for resign-key notifications (drives "hide on click away" mode)
+        self._win_observer = _WindowObserver.alloc().init()
+        self._win_observer._callback = self._on_resign_key
+        NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self._win_observer,
+            "handleResignKey:",
+            "NSWindowDidResignKeyNotification",
+            self._panel,
+        )
 
         content = self._panel.contentView()
 
@@ -702,6 +732,11 @@ class SearchPanel:
     def hide(self) -> None:
         self._panel.orderOut_(None)
 
+    def _on_resign_key(self) -> None:
+        """Called when the panel loses key status. Hides unless persist_window is on."""
+        if not self._prefs.persist_window:
+            self.hide()
+
     def toggle(self) -> None:
         if self._panel.isVisible():
             self.hide()
@@ -758,7 +793,8 @@ class SearchPanel:
         self._debounce_timer.daemon = True
         self._debounce_timer.start()
         if self._current_mode != "keyword":
-            call_on_main(lambda: self._count_label.setStringValue_("searching…"))
+            label = "deep search…" if self._prefs.use_hyde else "searching…"
+            call_on_main(lambda: self._count_label.setStringValue_(label))
 
     def _set_mode(self, mode: str) -> None:
         if mode in _MODE_KEYS:
@@ -771,10 +807,11 @@ class SearchPanel:
     # ------------------------------------------------------------------
 
     def _run_search_bg(self, query: str) -> None:
-        n    = self._prefs.n_results
-        mode = self._current_mode
+        n        = self._prefs.n_results
+        mode     = self._current_mode
+        use_hyde = self._prefs.use_hyde and mode != "keyword"
         try:
-            results = self._searcher.search(query, n=n, mode=mode)
+            results = self._searcher.search(query, n=n, mode=mode, use_hyde=use_hyde)
         except Exception as e:
             err = str(e)
             call_on_main(lambda: self._count_label.setStringValue_(f"error: {err}"))

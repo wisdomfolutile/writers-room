@@ -40,6 +40,8 @@ DEFAULTS: dict = {
     "n_results":      5,
     "default_mode":   "semantic",   # "semantic" | "hybrid" | "keyword"
     "launch_at_login": False,
+    "persist_window":  True,        # keep panel open when focus moves elsewhere
+    "use_hyde":        False,       # HyDE: embed a hypothetical note instead of raw query
 }
 
 LAUNCH_AGENT_PLIST_PATH = (
@@ -110,6 +112,28 @@ class Preferences:
         self.save()
         _set_launch_at_login(bool(v))
 
+    # ---- persist_window ----
+
+    @property
+    def persist_window(self) -> bool:
+        return bool(self._data.get("persist_window", DEFAULTS["persist_window"]))
+
+    @persist_window.setter
+    def persist_window(self, v: bool) -> None:
+        self._data["persist_window"] = bool(v)
+        self.save()
+
+    # ---- use_hyde ----
+
+    @property
+    def use_hyde(self) -> bool:
+        return bool(self._data.get("use_hyde", DEFAULTS["use_hyde"]))
+
+    @use_hyde.setter
+    def use_hyde(self, v: bool) -> None:
+        self._data["use_hyde"] = bool(v)
+        self.save()
+
 
 # ---------------------------------------------------------------------------
 # Launch-at-login helpers (LaunchAgent plist)
@@ -171,7 +195,7 @@ def _make_label(text: str, x: float, y: float, w: float = 160, h: float = 20) ->
 class PreferencesWindowController(NSWindowController):
 
     def _build_window(self) -> None:
-        W, H = 380, 280
+        W, H = 380, 380
         style = (
             NSTitledWindowMask
             | NSClosableWindowMask
@@ -225,9 +249,29 @@ class PreferencesWindowController(NSWindowController):
 
         y -= 50
 
+        # ---- Persist window ----
+        self._persist_checkbox = NSButton.alloc().initWithFrame_(NSMakeRect(20, y, 340, 22))
+        self._persist_checkbox.setButtonType_(3)   # NSSwitchButton
+        self._persist_checkbox.setTitle_("Keep panel open when focus moves away")
+        self._persist_checkbox.setFont_(NSFont.systemFontOfSize_(13))
+        self._persist_checkbox.setState_(1 if self._prefs.persist_window else 0)
+        content.addSubview_(self._persist_checkbox)
+
+        y -= 50
+
+        # ---- HyDE deep semantic search ----
+        self._hyde_checkbox = NSButton.alloc().initWithFrame_(NSMakeRect(20, y, 340, 22))
+        self._hyde_checkbox.setButtonType_(3)
+        self._hyde_checkbox.setTitle_("Deep semantic search (HyDE — better for reflective queries)")
+        self._hyde_checkbox.setFont_(NSFont.systemFontOfSize_(13))
+        self._hyde_checkbox.setState_(1 if self._prefs.use_hyde else 0)
+        content.addSubview_(self._hyde_checkbox)
+
+        y -= 50
+
         # ---- Launch at login ----
         self._login_checkbox = NSButton.alloc().initWithFrame_(NSMakeRect(20, y, 260, 22))
-        self._login_checkbox.setButtonType_(3)   # NSSwitchButton = 3
+        self._login_checkbox.setButtonType_(3)
         self._login_checkbox.setTitle_("Launch Writers Room at login")
         self._login_checkbox.setFont_(NSFont.systemFontOfSize_(13))
         self._login_checkbox.setState_(1 if self._prefs.launch_at_login else 0)
@@ -250,8 +294,6 @@ class PreferencesWindowController(NSWindowController):
         self._status_label.setFont_(NSFont.systemFontOfSize_(11))
         self._status_label.setTextColor_(NSColor.secondaryLabelColor())
         content.addSubview_(self._status_label)
-
-        y -= 50
 
         # ---- Save button ----
         save_btn = NSButton.alloc().initWithFrame_(NSMakeRect(W - 100, 16, 80, 28))
@@ -287,8 +329,10 @@ class PreferencesWindowController(NSWindowController):
 
     @objc.IBAction
     def saveClicked_(self, sender) -> None:
-        self._prefs.n_results    = int(self._stepper.intValue())
-        self._prefs.default_mode = _MODE_KEYS[self._mode_control.selectedSegment()]
+        self._prefs.n_results       = int(self._stepper.intValue())
+        self._prefs.default_mode    = _MODE_KEYS[self._mode_control.selectedSegment()]
+        self._prefs.persist_window  = bool(self._persist_checkbox.state())
+        self._prefs.use_hyde        = bool(self._hyde_checkbox.state())
         self._prefs.launch_at_login = bool(self._login_checkbox.state())
         self.window().orderOut_(None)
 
@@ -301,12 +345,14 @@ class PreferencesWindowController(NSWindowController):
 # Module-level factory — avoids PyObjC intercepting classmethods on NSObject subclasses
 def make_prefs_controller(prefs: Preferences, searcher) -> PreferencesWindowController:
     controller = PreferencesWindowController.alloc().init()
-    controller._prefs          = prefs
-    controller._searcher       = searcher
-    controller._status_label   = None
-    controller._stepper        = None
-    controller._count_label    = None
-    controller._mode_control   = None
-    controller._login_checkbox = None
+    controller._prefs            = prefs
+    controller._searcher         = searcher
+    controller._status_label     = None
+    controller._stepper          = None
+    controller._count_label      = None
+    controller._mode_control     = None
+    controller._login_checkbox   = None
+    controller._persist_checkbox = None
+    controller._hyde_checkbox    = None
     controller._build_window()
     return controller

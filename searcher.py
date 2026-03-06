@@ -24,6 +24,14 @@ EMBEDDING_MODEL = "text-embedding-3-small"
 
 LRU_MAX = 50  # cached query embeddings
 
+# HyDE system prompt — tells the model to write a plausible note excerpt
+_HYDE_SYSTEM = (
+    "You are helping search a writer's personal notes. "
+    "Given the writer's query, write a short note excerpt (2–3 sentences, first person) "
+    "that would directly answer it. Be specific about themes, emotions, and topics. "
+    "No title, no metadata — just the note content itself."
+)
+
 
 class NotesSearcher:
     """
@@ -78,10 +86,14 @@ class NotesSearcher:
     # Public search
     # ------------------------------------------------------------------
 
-    def search(self, query: str, n: int = 5, mode: str = "semantic") -> list[dict]:
+    def search(self, query: str, n: int = 5, mode: str = "semantic",
+               use_hyde: bool = False) -> list[dict]:
         """
         Search the index. Returns a list of result dicts:
             { title, folder, content, snippet, score }
+
+        use_hyde: embed a GPT-generated hypothetical note instead of the raw query.
+                  Dramatically improves recall for conversational / reflective queries.
 
         Safe to call from a background thread.
         Raises RuntimeError if index has not been loaded.
@@ -96,11 +108,17 @@ class NotesSearcher:
         embeddings = self._embeddings
         metadata   = self._metadata
 
+        # Choose embedding strategy
+        def _vec():
+            if use_hyde:
+                return self._get_embedding_hyde(query)
+            return self._get_embedding(query)
+
         if mode == "keyword":
             scores = np.array([self._keyword_score(query, note) for note in metadata])
 
         elif mode == "hybrid":
-            query_vec = self._get_embedding(query)
+            query_vec = _vec()
             sem_scores = self._cosine_similarity(query_vec, embeddings)
             s_min, s_max = sem_scores.min(), sem_scores.max()
             sem_norm = (sem_scores - s_min) / (s_max - s_min + 1e-10)
@@ -108,7 +126,7 @@ class NotesSearcher:
             scores = 0.5 * sem_norm + 0.5 * kw_scores
 
         else:  # semantic (default)
-            query_vec = self._get_embedding(query)
+            query_vec = _vec()
             scores = self._cosine_similarity(query_vec, embeddings)
 
         top_indices = np.argsort(scores)[::-1][:n]
@@ -166,6 +184,48 @@ class NotesSearcher:
         self._cache_order.append(query)
 
         # Evict oldest if over limit
+        if len(self._cache_order) > LRU_MAX:
+            oldest = self._cache_order.pop(0)
+            del self._cache[oldest]
+
+        return vec
+
+    def _get_embedding_hyde(self, query: str) -> np.ndarray:
+        """
+        HyDE: ask GPT-4o-mini to write a hypothetical note that answers this query,
+        then embed that instead of the raw question.
+
+        Because the hypothetical is a first-person statement like real note content,
+        it lands much closer in embedding space to actual relevant notes — especially
+        for reflective / conversational queries like "what have I been writing about grief?"
+        """
+        cache_key = f"__hyde__{query}"
+        if cache_key in self._cache:
+            self._cache_order.remove(cache_key)
+            self._cache_order.append(cache_key)
+            return self._cache[cache_key]
+
+        # Step 1: generate hypothetical note
+        chat = self._client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": _HYDE_SYSTEM},
+                {"role": "user",   "content": query},
+            ],
+            max_tokens=120,
+            temperature=0.7,
+        )
+        hypothetical = chat.choices[0].message.content.strip()
+
+        # Step 2: embed it
+        embed_resp = self._client.embeddings.create(
+            model=EMBEDDING_MODEL,
+            input=[hypothetical],
+        )
+        vec = np.array(embed_resp.data[0].embedding, dtype=np.float32)
+
+        self._cache[cache_key] = vec
+        self._cache_order.append(cache_key)
         if len(self._cache_order) > LRU_MAX:
             oldest = self._cache_order.pop(0)
             del self._cache[oldest]

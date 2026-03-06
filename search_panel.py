@@ -63,7 +63,10 @@ from AppKit import (
     NSVisualEffectView,
 )
 from AppKit import (
+    NSEvent,
     NSFloatingWindowLevel,
+    NSMakeSize,
+    NSViewMinXMargin,
     NSViewWidthSizable,
     NSViewHeightSizable,
 )
@@ -97,6 +100,72 @@ class _WindowObserver(NSObject):
     def handleResignKey_(self, notification) -> None:
         if self._callback:
             self._callback()
+
+
+# ---------------------------------------------------------------------------
+# Resize observer — fires NSWindowDidResizeNotification → relayout
+# ---------------------------------------------------------------------------
+
+class _ResizeObserver(NSObject):
+    def init(self):
+        self = objc.super(_ResizeObserver, self).init()
+        if self is None:
+            return None
+        self._callback = None
+        return self
+
+    def handleResize_(self, notification) -> None:
+        if self._callback:
+            self._callback()
+
+
+# ---------------------------------------------------------------------------
+# Resize grip — bottom-right corner drag handle
+# ---------------------------------------------------------------------------
+
+class _ResizeGrip(NSView):
+    """
+    Draws a subtle 3-dot diagonal indicator and handles mouse-drag resize.
+    Top-left corner of the panel stays fixed; bottom-right corner moves.
+    """
+
+    def init(self):
+        self = objc.super(_ResizeGrip, self).init()
+        if self is None:
+            return None
+        self._drag_origin   = None
+        self._initial_frame = None
+        return self
+
+    def drawRect_(self, rect) -> None:
+        NSColor.tertiaryLabelColor().set()
+        b = self.bounds()
+        for i in range(3):
+            x = b.size.width - 5 - i * 5
+            y = 4             + i * 5
+            NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(x, y, 2.5, 2.5)).fill()
+
+    def mouseDown_(self, event) -> None:
+        self._drag_origin   = NSEvent.mouseLocation()
+        self._initial_frame = self.window().frame()
+
+    def mouseDragged_(self, event) -> None:
+        if self._drag_origin is None:
+            return
+        loc  = NSEvent.mouseLocation()
+        dx   = loc.x - self._drag_origin.x
+        dy   = loc.y - self._drag_origin.y   # positive = moved up
+        f    = self._initial_frame
+        new_w = max(MIN_W, f.size.width  + dx)
+        new_h = max(MIN_H, f.size.height - dy)   # dy < 0 when dragging down → taller
+        new_y = f.origin.y + f.size.height - new_h  # keep top edge fixed
+        self.window().setFrame_display_(
+            NSMakeRect(f.origin.x, new_y, new_w, new_h), True
+        )
+
+    def mouseUp_(self, event) -> None:
+        self._drag_origin   = None
+        self._initial_frame = None
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +228,10 @@ FOLDER_W  = 100   # folder chip width
 INNER_PAD = 16    # left/right inner padding
 OPEN_BTN_W = 22   # ↗ icon button width
 OPEN_BTN_X = PANEL_W - INNER_PAD - OPEN_BTN_W  # = 582
+
+MIN_W     = 480   # minimum panel width during resize
+MIN_H     = 300   # minimum panel height during resize
+GRIP_SIZE = 20    # bottom-right resize grip dimensions
 
 
 # ---------------------------------------------------------------------------
@@ -468,12 +541,14 @@ class _ResultCell(NSView):
             size=15, bold=False,
         )
         self._title.setFont_(_TITLE_FONT)
+        self._title.setAutoresizingMask_(NSViewWidthSizable)   # stretches with cell width
         self.addSubview_(self._title)
 
         # ── Folder chip — code-chip style, right of title, left of ↗ button
         # x = OPEN_BTN_X - FOLDER_W - 8 = 582 - 100 - 8 = 474
         # Height 22 so the chip has 2px padding above/below the 18px text baseline
         self._folder = _make_folder_chip(474, ROW_H - 30, FOLDER_W, 22)
+        self._folder.setAutoresizingMask_(NSViewMinXMargin)    # stays at fixed right offset
         self.addSubview_(self._folder)
 
         # ── Snippet — below title, full width minus padding
@@ -481,6 +556,7 @@ class _ResultCell(NSView):
             "", INNER_PAD, 10, W - INNER_PAD * 2, 17,
             size=12, color=NSColor.secondaryLabelColor(),
         )
+        self._snippet.setAutoresizingMask_(NSViewWidthSizable)  # stretches with cell width
         self.addSubview_(self._snippet)
 
         # ── Open-in-Notes icon button (↗) — far right, vertically centred
@@ -498,6 +574,7 @@ class _ResultCell(NSView):
         self._open_btn.setContentTintColor_(_accent())
         self._open_btn.setTarget_(self)
         self._open_btn.setAction_("openInNotesFromButton_")
+        self._open_btn.setAutoresizingMask_(NSViewMinXMargin)   # stays at right edge
         self.addSubview_(self._open_btn)
 
         return self
@@ -537,7 +614,17 @@ class SearchPanel:
         self._current_mode:   str                  = prefs.default_mode
         self._debounce_timer: threading.Timer | None = None
         self._syn_id:         int = 0              # generation counter for synthesis cancellation
-        self._win_observer:   _WindowObserver | None = None
+        self._win_observer:   _WindowObserver  | None = None
+
+        # Layout refs (set in _build, used in _layout / _on_resize)
+        self._vev:             NSVisualEffectView | None = None
+        self._search_icon:     NSImageView        | None = None
+        self._sep1:            NSBox              | None = None
+        self._answer_scroll:   NSScrollView       | None = None
+        self._sep2:            NSBox              | None = None
+        self._table_scroll:    NSScrollView       | None = None
+        self._resize_grip:     _ResizeGrip        | None = None
+        self._resize_observer: _ResizeObserver    | None = None
 
         self._build()
 
@@ -556,6 +643,8 @@ class SearchPanel:
         self._panel.setHidesOnDeactivate_(False)
         self._panel.setOpaque_(False)
         self._panel.setBackgroundColor_(NSColor.clearColor())
+        self._panel.setMovableByWindowBackground_(True)      # drag any background area to move
+        self._panel.setMinSize_(NSMakeSize(MIN_W, MIN_H))    # enforce minimum dimensions
         self._panel.center()
 
         # Register for resign-key notifications (drives "hide on click away" mode)
@@ -568,10 +657,21 @@ class SearchPanel:
             self._panel,
         )
 
+        # Register for resize notifications → relayout all subviews
+        self._resize_observer = _ResizeObserver.alloc().init()
+        self._resize_observer._callback = self._on_resize
+        NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self._resize_observer,
+            "handleResize:",
+            "NSWindowDidResizeNotification",
+            self._panel,
+        )
+
         content = self._panel.contentView()
 
         # ── Frosted glass background ─────────────────────────────────
-        vev = NSVisualEffectView.alloc().initWithFrame_(content.bounds())
+        self._vev = NSVisualEffectView.alloc().initWithFrame_(content.bounds())
+        vev = self._vev   # local alias for readability below
         vev.setMaterial_(_MATERIAL)
         vev.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
         vev.setState_(_VEV_STATE)
@@ -582,16 +682,16 @@ class SearchPanel:
         content.addSubview_(vev)
 
         # ── Search bar row ───────────────────────────────────────────
-        search_icon = NSImageView.alloc().initWithFrame_(
+        self._search_icon = NSImageView.alloc().initWithFrame_(
             NSMakeRect(14, H - SEARCH_H + 17, 22, 22)
         )
         sf_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
             "magnifyingglass", "Search"
         )
         if sf_img:
-            search_icon.setImage_(sf_img)
-            search_icon.setContentTintColor_(NSColor.tertiaryLabelColor())
-        content.addSubview_(search_icon)
+            self._search_icon.setImage_(sf_img)
+            self._search_icon.setContentTintColor_(NSColor.tertiaryLabelColor())
+        content.addSubview_(self._search_icon)
 
         FIELD_L = 44
         MODE_W  = 175
@@ -640,19 +740,20 @@ class SearchPanel:
         content.addSubview_(self._count_label)
 
         # ── Separator 1: below search bar ────────────────────────────
-        sep1 = NSBox.alloc().initWithFrame_(
+        self._sep1 = NSBox.alloc().initWithFrame_(
             NSMakeRect(0, H - SEARCH_H, W, SEP_H)
         )
-        sep1.setBoxType_(2)   # NSBoxSeparator
-        content.addSubview_(sep1)
+        self._sep1.setBoxType_(2)   # NSBoxSeparator
+        content.addSubview_(self._sep1)
 
         # ── Answer / synthesis area ──────────────────────────────────
         # y position: just below sep1 going down (i.e. H - SEARCH_H - SEP_H - ANSWER_H)
         answer_y = H - SEARCH_H - SEP_H - ANSWER_H
 
-        answer_scroll = NSScrollView.alloc().initWithFrame_(
+        self._answer_scroll = NSScrollView.alloc().initWithFrame_(
             NSMakeRect(0, answer_y, W, ANSWER_H)
         )
+        answer_scroll = self._answer_scroll   # local alias
         answer_scroll.setHasVerticalScroller_(True)
         answer_scroll.setAutohidesScrollers_(True)
         answer_scroll.setDrawsBackground_(False)
@@ -666,7 +767,6 @@ class SearchPanel:
         self._answer_view.setFont_(NSFont.systemFontOfSize_(13))
         self._answer_view.setTextColor_(NSColor.labelColor())
         self._answer_view.textContainer().setLineFragmentPadding_(0)
-        from AppKit import NSMakeSize
         self._answer_view.setTextContainerInset_(NSMakeSize(16, 10))
 
         self._answer_delegate = _AnswerDelegate.alloc().init()
@@ -678,18 +778,19 @@ class SearchPanel:
 
         # ── Separator 2: between answer area and results ─────────────
         sep2_y = answer_y - SEP2_H
-        sep2 = NSBox.alloc().initWithFrame_(
+        self._sep2 = NSBox.alloc().initWithFrame_(
             NSMakeRect(0, sep2_y, W, SEP2_H)
         )
-        sep2.setBoxType_(2)
-        content.addSubview_(sep2)
+        self._sep2.setBoxType_(2)
+        content.addSubview_(self._sep2)
 
         # ── Results table ────────────────────────────────────────────
         table_h = sep2_y   # fill from 0 up to sep2
 
-        scroll = NSScrollView.alloc().initWithFrame_(
+        self._table_scroll = NSScrollView.alloc().initWithFrame_(
             NSMakeRect(0, 0, W, table_h)
         )
+        scroll = self._table_scroll   # local alias
         scroll.setHasVerticalScroller_(True)
         scroll.setAutohidesScrollers_(True)
         scroll.setDrawsBackground_(False)
@@ -718,6 +819,11 @@ class SearchPanel:
         scroll.setDocumentView_(self._table_view)
         content.addSubview_(scroll)
 
+        # ── Resize grip — bottom-right corner ────────────────────────
+        self._resize_grip = _ResizeGrip.alloc().init()
+        self._resize_grip.setFrame_(NSMakeRect(W - GRIP_SIZE, 0, GRIP_SIZE, GRIP_SIZE))
+        content.addSubview_(self._resize_grip)
+
     # ------------------------------------------------------------------
     # Show / hide / toggle
     # ------------------------------------------------------------------
@@ -736,6 +842,40 @@ class SearchPanel:
         """Called when the panel loses key status. Hides unless persist_window is on."""
         if not self._prefs.persist_window:
             self.hide()
+
+    def _on_resize(self) -> None:
+        """Called (main thread) whenever the panel is resized. Relayouts all subviews."""
+        f = self._panel.frame()
+        self._layout(f.size.width, f.size.height)
+
+    def _layout(self, W: float, H: float) -> None:
+        """Reposition/resize all panel subviews for new dimensions W × H."""
+        MODE_W  = 175
+        FIELD_L = 44
+        FIELD_R = W - MODE_W - 12
+
+        answer_y = H - SEARCH_H - SEP_H - ANSWER_H
+        sep2_y   = answer_y - SEP2_H
+        table_h  = sep2_y
+
+        self._vev.setFrame_(NSMakeRect(0, 0, W, H))
+        self._search_icon.setFrame_(NSMakeRect(14, H - SEARCH_H + 17, 22, 22))
+        self._query_field.setFrame_(NSMakeRect(FIELD_L, H - SEARCH_H + 13, FIELD_R - FIELD_L, 30))
+        self._mode_control.setFrame_(NSMakeRect(W - MODE_W - 10, H - SEARCH_H + 15, MODE_W, 26))
+        self._count_label.setFrame_(NSMakeRect(FIELD_L, H - SEARCH_H + 2, FIELD_R - FIELD_L, 11))
+        self._sep1.setFrame_(NSMakeRect(0, H - SEARCH_H, W, SEP_H))
+        self._answer_scroll.setFrame_(NSMakeRect(0, answer_y, W, ANSWER_H))
+        self._answer_view.setFrame_(NSMakeRect(0, 0, W, ANSWER_H))
+        self._answer_view.textContainer().setContainerSize_(NSMakeSize(W - 32, 1e7))
+        self._sep2.setFrame_(NSMakeRect(0, sep2_y, W, SEP2_H))
+        self._table_scroll.setFrame_(NSMakeRect(0, 0, W, table_h))
+        self._table_view.setFrame_(NSMakeRect(0, 0, W, table_h))
+        self._resize_grip.setFrame_(NSMakeRect(W - GRIP_SIZE, 0, GRIP_SIZE, GRIP_SIZE))
+
+        # Widen the table column so cells get the new width
+        cols = self._table_view.tableColumns()
+        if cols:
+            cols[0].setWidth_(W)
 
     def toggle(self) -> None:
         if self._panel.isVisible():

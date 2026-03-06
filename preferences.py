@@ -19,6 +19,7 @@ from AppKit import (
     NSButton,
     NSClosableWindowMask,
     NSColor,
+    NSFloatingWindowLevel,
     NSFont,
     NSMakeRect,
     NSMiniaturizableWindowMask,
@@ -208,6 +209,7 @@ class PreferencesWindowController(NSWindowController):
             False,
         )
         win.setTitle_("Writers Room — Preferences")
+        win.setLevel_(NSFloatingWindowLevel)   # float above the search panel
         win.center()
         self.setWindow_(win)
         content = win.contentView()

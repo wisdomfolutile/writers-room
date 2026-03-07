@@ -70,7 +70,7 @@ from AppKit import (
     NSViewWidthSizable,
     NSViewHeightSizable,
 )
-from Foundation import NSNotificationCenter, NSURL
+from Foundation import NSNotificationCenter, NSURL, NSIndexSet
 
 # ---------------------------------------------------------------------------
 # NSPanel subclass — borderless, accepts keyboard input
@@ -140,9 +140,12 @@ class _ResizeGrip(NSView):
     def drawRect_(self, rect) -> None:
         NSColor.tertiaryLabelColor().set()
         b = self.bounds()
+        # Inset from edges so dots sit comfortably inside the rounded panel corner
+        PAD_R = 8   # right inset
+        PAD_B = 8   # bottom inset
         for i in range(3):
-            x = b.size.width - 5 - i * 5
-            y = 4             + i * 5
+            x = b.size.width  - PAD_R - 2.5 - i * 5
+            y = PAD_B         + i * 5
             NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(x, y, 2.5, 2.5)).fill()
 
     def mouseDown_(self, event) -> None:
@@ -191,13 +194,14 @@ except ImportError:
 PANEL_W   = 620
 SEARCH_H  = 56          # search bar height
 SEP_H     = 1           # separator below search bar
-ANSWER_H  = 130         # synthesis text area
+STATUS_H  = 18          # status strip (results count / searching…) below sep1
+ANSWER_H  = 112         # synthesis text area (was 130; 18 moved to STATUS_H)
 SEP2_H    = 1           # separator between synthesis and results
 ROW_H     = 64.0        # result row height
 CORNER_R  = 16.0        # panel corner radius
 
-# Total height: search bar + answer area + 5 result rows + small footer
-PANEL_H = SEARCH_H + SEP_H + ANSWER_H + SEP2_H + int(ROW_H * 5) + 8  # = 516
+# Total height: search + sep + status + answer + sep + 5 rows + footer = 516 (unchanged)
+PANEL_H = SEARCH_H + SEP_H + STATUS_H + ANSWER_H + SEP2_H + int(ROW_H * 5) + 8
 
 # Mode control
 _MODE_LABELS = ["Semantic", "Hybrid", "Keyword"]
@@ -224,14 +228,13 @@ _PLACEHOLDERS = [
     "What have I abandoned that deserves another look?",
 ]
 
-FOLDER_W  = 100   # folder chip width
-INNER_PAD = 16    # left/right inner padding
-OPEN_BTN_W = 22   # ↗ icon button width
-OPEN_BTN_X = PANEL_W - INNER_PAD - OPEN_BTN_W  # = 582
+INNER_PAD  = 16   # left/right inner padding
+OPEN_BTN_W = 22   # ↗ icon button size (square)
+CHIP_H     = 20   # folder chip height
 
 MIN_W     = 480   # minimum panel width during resize
 MIN_H     = 300   # minimum panel height during resize
-GRIP_SIZE = 20    # bottom-right resize grip dimensions
+GRIP_SIZE = 28    # bottom-right resize grip (larger for padding room)
 
 
 # ---------------------------------------------------------------------------
@@ -290,37 +293,37 @@ def _accent() -> NSColor:
 
 class _FolderChip(NSView):
     """
-    A folder name rendered as an inline code chip — like Claude's `server.py`
-    inline code style: SF Mono, subtle rounded-rect background that adapts
-    to light/dark mode via drawRect_ (no layer CGColor dance needed).
+    A folder name rendered as an inline code chip — SF Mono on a subtle rounded-rect
+    background. Width is set dynamically by _ResultCell._update_folder_chip() after
+    measuring the text; this view just owns the drawing and label.
     """
 
     def initWithFrame_(self, frame):
         self = objc.super(_FolderChip, self).initWithFrame_(frame)
         if self is None:
             return None
-        W, H = frame.size.width, frame.size.height
-        self._label = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(6, 2, W - 12, H - 4)
-        )
+        # Label fills the view bounds; padding is achieved by the frame itself
+        self._label = NSTextField.alloc().initWithFrame_(self.bounds())
         self._label.setEditable_(False)
         self._label.setBordered_(False)
         self._label.setDrawsBackground_(False)
         self._label.setFont_(NSFont.monospacedSystemFontOfSize_weight_(10, 0))
         self._label.setTextColor_(NSColor.secondaryLabelColor())
-        self._label.setAlignment_(1)   # NSTextAlignmentCenter
-        self._label.setLineBreakMode_(3)
+        self._label.setAlignment_(2)      # NSTextAlignmentCenter — text centered in label
+        self._label.setLineBreakMode_(4)  # NSLineBreakByTruncatingMiddle
         self.addSubview_(self._label)
         return self
 
     def drawRect_(self, rect) -> None:
         NSColor.labelColor().colorWithAlphaComponent_(0.07).set()
         NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            self.bounds(), 5.0, 5.0
+            self.bounds(), 4.0, 4.0
         ).fill()
 
     def setFolder_(self, name: str) -> None:
         self._label.setStringValue_(name)
+        # Keep label filling the full chip frame so centering is correct
+        self._label.setFrame_(self.bounds())
 
 
 def _make_folder_chip(x: float, y: float, w: float, h: float) -> _FolderChip:
@@ -443,6 +446,8 @@ class _QueryDelegate(NSObject):
         self.on_change:      Callable[[str], None] | None = None
         self.on_escape:      Callable[[], None]    | None = None
         self.on_enter_first: Callable[[], None]    | None = None
+        self.on_move_down:   Callable[[], None]    | None = None
+        self.on_move_up:     Callable[[], None]    | None = None
         return self
 
     def controlTextDidChange_(self, notification) -> None:
@@ -458,6 +463,14 @@ class _QueryDelegate(NSObject):
             if self.on_enter_first:
                 self.on_enter_first()
             return True
+        if sel == "moveDown:":
+            if self.on_move_down:
+                self.on_move_down()
+            return True
+        if sel == "moveUp:":
+            if self.on_move_up:
+                self.on_move_up()
+            return True
         return False
 
 
@@ -471,6 +484,9 @@ class _ResultsDataSource(NSObject):
         self = objc.super(_ResultsDataSource, self).init()
         self._results: list[dict] = []
         self.on_open: Callable[[dict], None] | None = None
+        # Set to True during programmatic keyboard-nav selection so that
+        # tableViewSelectionDidChange_ highlights without opening the note.
+        self.keyboard_navigating: bool = False
         return self
 
     def set_results(self, results: list[dict]) -> None:
@@ -506,10 +522,15 @@ class _ResultsDataSource(NSObject):
     def tableViewSelectionDidChange_(self, notification) -> None:
         tv  = notification.object()
         row = tv.selectedRow()
-        if 0 <= row < len(self._results) and self.on_open:
-            result = self._results[row]
-            tv.deselectAll_(None)
-            self.on_open(result)
+        if 0 <= row < len(self._results):
+            if self.keyboard_navigating:
+                # Arrow-key navigation: just highlight, don't open
+                tv.scrollRowToVisible_(row)
+            elif self.on_open:
+                # Mouse click: open immediately and deselect
+                result = self._results[row]
+                tv.deselectAll_(None)
+                self.on_open(result)
 
 
 # ---------------------------------------------------------------------------
@@ -517,8 +538,7 @@ class _ResultsDataSource(NSObject):
 # ---------------------------------------------------------------------------
 
 _TITLE_FONT   = NSFont.systemFontOfSize_weight_(15, 0.4)   # medium weight
-_SNIPPET_FONT = NSFont.systemFontOfSize_(12)
-_FOLDER_FONT  = NSFont.systemFontOfSize_(11)
+_CHIP_FONT    = NSFont.monospacedSystemFontOfSize_weight_(10, 0)
 
 
 class _ResultCell(NSView):
@@ -531,59 +551,105 @@ class _ResultCell(NSView):
         self._open_callback: Callable[[dict], None] | None = None
         self._result: dict | None = None
 
-        W = PANEL_W
+        W = frame.size.width or PANEL_W
 
-        # ── Title — left side, leaves room for folder + ↗ button
-        # Available right edge before folder: OPEN_BTN_X - FOLDER_W - 8 = 582 - 100 - 8 = 474
-        # Title width = 474 - INNER_PAD = 474 - 16 = 458
+        # ── Title — left side; right boundary is updated in _update_folder_chip
         self._title = _label(
-            "", INNER_PAD, ROW_H - 28, 458, 19,
+            "", INNER_PAD, ROW_H - 28, W - INNER_PAD * 2 - OPEN_BTN_W - 6 - 60, 19,
             size=15, bold=False,
         )
         self._title.setFont_(_TITLE_FONT)
-        self._title.setAutoresizingMask_(NSViewWidthSizable)   # stretches with cell width
+        self._title.setAutoresizingMask_(NSViewWidthSizable)
         self.addSubview_(self._title)
 
-        # ── Folder chip — code-chip style, right of title, left of ↗ button
-        # x = OPEN_BTN_X - FOLDER_W - 8 = 582 - 100 - 8 = 474
-        # Height 22 so the chip has 2px padding above/below the 18px text baseline
-        self._folder = _make_folder_chip(474, ROW_H - 30, FOLDER_W, 22)
-        self._folder.setAutoresizingMask_(NSViewMinXMargin)    # stays at fixed right offset
-        self.addSubview_(self._folder)
-
-        # ── Snippet — below title, full width minus padding
+        # ── Snippet — below title, stretches with cell width
         self._snippet = _label(
             "", INNER_PAD, 10, W - INNER_PAD * 2, 17,
             size=12, color=NSColor.secondaryLabelColor(),
         )
-        self._snippet.setAutoresizingMask_(NSViewWidthSizable)  # stretches with cell width
+        self._snippet.setAutoresizingMask_(NSViewWidthSizable)
         self.addSubview_(self._snippet)
 
-        # ── Open-in-Notes icon button (↗) — far right, vertically centred
-        btn_y = int((ROW_H - OPEN_BTN_W) / 2)
+        # ── Folder chip — starts with a placeholder frame; resized in _update_folder_chip
+        chip_y = int((ROW_H - CHIP_H) / 2)   # vertically centred in row
+        self._folder = _make_folder_chip(W - INNER_PAD - OPEN_BTN_W - 6 - 60,
+                                         chip_y, 60, CHIP_H)
+        self._folder.setAutoresizingMask_(NSViewMinXMargin)
+        self.addSubview_(self._folder)
+
+        # ── Open-in-Notes icon button (↗) — far right, same vertical centre as chip
+        btn_y = int((ROW_H - OPEN_BTN_W) / 2)   # centred in full row height
+        open_x = W - INNER_PAD - OPEN_BTN_W
         self._open_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(OPEN_BTN_X, btn_y, OPEN_BTN_W, OPEN_BTN_W)
+            NSMakeRect(open_x, btn_y, OPEN_BTN_W, OPEN_BTN_W)
         )
         sf_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
             "arrow.up.right.square", "Open in Notes"
         )
         if sf_img:
             self._open_btn.setImage_(sf_img)
-        self._open_btn.setBezelStyle_(0)          # borderless
+        self._open_btn.setBezelStyle_(0)
         self._open_btn.setBordered_(False)
         self._open_btn.setContentTintColor_(_accent())
         self._open_btn.setTarget_(self)
         self._open_btn.setAction_("openInNotesFromButton_")
-        self._open_btn.setAutoresizingMask_(NSViewMinXMargin)   # stays at right edge
+        self._open_btn.setAutoresizingMask_(NSViewMinXMargin)
         self.addSubview_(self._open_btn)
 
         return self
+
+    # ------------------------------------------------------------------
+    # Dynamic folder chip sizing — called every time setResult_ fires
+    # ------------------------------------------------------------------
+
+    def _update_folder_chip(self, folder_name: str) -> None:
+        """
+        Measure the folder name text, resize the chip to fit snugly, and
+        update the title width so it never overlaps the chip.
+        All positions are relative to the current cell width.
+        """
+        W_cell = self.frame().size.width or PANEL_W
+
+        # Measure text width at the chip font size
+        if folder_name:
+            attr_str = NSAttributedString.alloc().initWithString_attributes_(
+                folder_name, {NSFontAttributeName: _CHIP_FONT}
+            )
+            text_w = attr_str.size().width
+        else:
+            text_w = 0
+
+        # Chip width: text + 12px horizontal padding (6px per side), clamped
+        chip_w = max(38, min(150, int(text_w) + 12))
+        chip_y = int((ROW_H - CHIP_H) / 2)
+
+        # Open button: right-padded from the cell edge
+        open_x  = W_cell - INNER_PAD - OPEN_BTN_W
+        # Chip: immediately left of the open button with a 6px gap
+        chip_x  = open_x - 6 - chip_w
+
+        # Reposition chip and refresh its internal label frame for centering
+        self._folder.setFrame_(NSMakeRect(chip_x, chip_y, chip_w, CHIP_H))
+        self._folder._label.setFrame_(self._folder.bounds())
+        self._folder.setNeedsDisplay_(True)
+
+        # Also keep open button at the correct x (handles cell-width changes on reuse)
+        btn_y = int((ROW_H - OPEN_BTN_W) / 2)
+        self._open_btn.setFrame_(NSMakeRect(open_x, btn_y, OPEN_BTN_W, OPEN_BTN_W))
+
+        # Title: from left pad to 8px left of chip
+        title_w = max(80, chip_x - INNER_PAD - 8)
+        self._title.setFrame_(NSMakeRect(INNER_PAD, ROW_H - 28, title_w, 19))
+
+        # Snippet: full available width
+        self._snippet.setFrame_(NSMakeRect(INNER_PAD, 10, W_cell - INNER_PAD * 2, 17))
 
     def setResult_(self, result: dict) -> None:
         self._result = result
         self._title.setStringValue_(_fix_cp1252(result.get("title", "")))
         self._folder.setFolder_(result.get("folder", ""))
         self._snippet.setStringValue_(_fix_cp1252(result.get("snippet", "")))
+        self._update_folder_chip(result.get("folder", ""))
 
     @objc.IBAction
     def openInNotesFromButton_(self, sender) -> None:
@@ -682,8 +748,11 @@ class SearchPanel:
         content.addSubview_(vev)
 
         # ── Search bar row ───────────────────────────────────────────
+        # Icon centred in SEARCH_H — matches the formula used in _layout()
+        _icon_sz = 20
+        _icon_y  = H - SEARCH_H + (SEARCH_H - _icon_sz) // 2
         self._search_icon = NSImageView.alloc().initWithFrame_(
-            NSMakeRect(14, H - SEARCH_H + 17, 22, 22)
+            NSMakeRect(14, _icon_y, _icon_sz, _icon_sz)
         )
         sf_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
             "magnifyingglass", "Search"
@@ -697,8 +766,10 @@ class SearchPanel:
         MODE_W  = 175
         FIELD_R = W - MODE_W - 12
 
+        _field_h = 30
+        _field_y = H - SEARCH_H + (SEARCH_H - _field_h) // 2
         self._query_field = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(FIELD_L, H - SEARCH_H + 13, FIELD_R - FIELD_L, 30)
+            NSMakeRect(FIELD_L, _field_y, FIELD_R - FIELD_L, _field_h)
         )
         self._query_field.setPlaceholderString_(random.choice(_PLACEHOLDERS))
         self._query_field.setFont_(NSFont.systemFontOfSize_(16))
@@ -711,6 +782,8 @@ class SearchPanel:
         self._delegate.on_change      = self._on_query_changed
         self._delegate.on_escape      = self.hide
         self._delegate.on_enter_first = self._open_first_result
+        self._delegate.on_move_down   = self._select_next_result
+        self._delegate.on_move_up     = self._select_prev_result
         self._query_field.setDelegate_(self._delegate)
         content.addSubview_(self._query_field)
 
@@ -727,18 +800,6 @@ class SearchPanel:
         self._mode_control.setFont_(NSFont.systemFontOfSize_(11))
         content.addSubview_(self._mode_control)
 
-        # Count / status label (bottom of search bar)
-        self._count_label = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(FIELD_L, H - SEARCH_H + 2, FIELD_R - FIELD_L, 11)
-        )
-        self._count_label.setStringValue_("")
-        self._count_label.setEditable_(False)
-        self._count_label.setBordered_(False)
-        self._count_label.setDrawsBackground_(False)
-        self._count_label.setFont_(NSFont.systemFontOfSize_(9))
-        self._count_label.setTextColor_(NSColor.quaternaryLabelColor())
-        content.addSubview_(self._count_label)
-
         # ── Separator 1: below search bar ────────────────────────────
         self._sep1 = NSBox.alloc().initWithFrame_(
             NSMakeRect(0, H - SEARCH_H, W, SEP_H)
@@ -746,9 +807,25 @@ class SearchPanel:
         self._sep1.setBoxType_(2)   # NSBoxSeparator
         content.addSubview_(self._sep1)
 
+        # ── Status strip: "searching…" / "5 results" — between sep1 and synthesis ──
+        # Sits just below the divider line with clean padding on both sides
+        status_y = H - SEARCH_H - SEP_H - STATUS_H
+        label_h  = 12
+        label_y  = status_y + (STATUS_H - label_h) // 2   # vertically centred in strip
+        self._count_label = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(INNER_PAD, label_y, W - INNER_PAD * 2, label_h)
+        )
+        self._count_label.setStringValue_("")
+        self._count_label.setEditable_(False)
+        self._count_label.setBordered_(False)
+        self._count_label.setDrawsBackground_(False)
+        self._count_label.setFont_(NSFont.systemFontOfSize_(10))
+        self._count_label.setTextColor_(NSColor.tertiaryLabelColor())
+        content.addSubview_(self._count_label)
+
         # ── Answer / synthesis area ──────────────────────────────────
-        # y position: just below sep1 going down (i.e. H - SEARCH_H - SEP_H - ANSWER_H)
-        answer_y = H - SEARCH_H - SEP_H - ANSWER_H
+        # y position: below search bar + sep1 + status strip
+        answer_y = H - SEARCH_H - SEP_H - STATUS_H - ANSWER_H
 
         self._answer_scroll = NSScrollView.alloc().initWithFrame_(
             NSMakeRect(0, answer_y, W, ANSWER_H)
@@ -854,22 +931,47 @@ class SearchPanel:
         FIELD_L = 44
         FIELD_R = W - MODE_W - 12
 
-        answer_y = H - SEARCH_H - SEP_H - ANSWER_H
+        # Vertical stack (top → bottom):
+        #   search bar (SEARCH_H) → sep1 (SEP_H) → status strip (STATUS_H)
+        #   → answer (ANSWER_H) → sep2 (SEP2_H) → results table (rest)
+        sep1_y   = H - SEARCH_H
+        status_y = sep1_y - SEP_H - STATUS_H
+        answer_y = status_y - ANSWER_H
         sep2_y   = answer_y - SEP2_H
         table_h  = sep2_y
 
         self._vev.setFrame_(NSMakeRect(0, 0, W, H))
-        self._search_icon.setFrame_(NSMakeRect(14, H - SEARCH_H + 17, 22, 22))
-        self._query_field.setFrame_(NSMakeRect(FIELD_L, H - SEARCH_H + 13, FIELD_R - FIELD_L, 30))
+
+        # Search bar elements — icon and query field vertically centred in SEARCH_H
+        icon_size = 20
+        icon_y    = H - SEARCH_H + (SEARCH_H - icon_size) // 2
+        self._search_icon.setFrame_(NSMakeRect(14, icon_y, icon_size, icon_size))
+        field_h = 30
+        field_y = H - SEARCH_H + (SEARCH_H - field_h) // 2
+        self._query_field.setFrame_(NSMakeRect(FIELD_L, field_y, FIELD_R - FIELD_L, field_h))
         self._mode_control.setFrame_(NSMakeRect(W - MODE_W - 10, H - SEARCH_H + 15, MODE_W, 26))
-        self._count_label.setFrame_(NSMakeRect(FIELD_L, H - SEARCH_H + 2, FIELD_R - FIELD_L, 11))
-        self._sep1.setFrame_(NSMakeRect(0, H - SEARCH_H, W, SEP_H))
+
+        # Sep1
+        self._sep1.setFrame_(NSMakeRect(0, sep1_y, W, SEP_H))
+
+        # Status label — vertically centred in STATUS strip
+        label_h = 12
+        label_y = status_y + (STATUS_H - label_h) // 2
+        self._count_label.setFrame_(NSMakeRect(INNER_PAD, label_y, W - INNER_PAD * 2, label_h))
+
+        # Answer / synthesis
         self._answer_scroll.setFrame_(NSMakeRect(0, answer_y, W, ANSWER_H))
         self._answer_view.setFrame_(NSMakeRect(0, 0, W, ANSWER_H))
         self._answer_view.textContainer().setContainerSize_(NSMakeSize(W - 32, 1e7))
+
+        # Sep2
         self._sep2.setFrame_(NSMakeRect(0, sep2_y, W, SEP2_H))
+
+        # Results table
         self._table_scroll.setFrame_(NSMakeRect(0, 0, W, table_h))
         self._table_view.setFrame_(NSMakeRect(0, 0, W, table_h))
+
+        # Resize grip
         self._resize_grip.setFrame_(NSMakeRect(W - GRIP_SIZE, 0, GRIP_SIZE, GRIP_SIZE))
 
         # Widen the table column so cells get the new width
@@ -971,6 +1073,7 @@ class SearchPanel:
     def _set_results(self, results: list[dict]) -> None:
         self._data_source.set_results(results)
         self._table_view.reloadData()
+        self._table_view.deselectAll_(None)   # clear any keyboard-nav highlight
 
     # ------------------------------------------------------------------
     # Synthesis (second-brain answer)
@@ -1044,9 +1147,44 @@ class SearchPanel:
     # ------------------------------------------------------------------
 
     def _open_first_result(self) -> None:
+        """Enter key: open the keyboard-highlighted row, or the first result."""
         results = self._data_source.results()
-        if results:
+        if not results:
+            return
+        row = self._table_view.selectedRow()
+        if 0 <= row < len(results):
+            self._open_note(results[row])
+        else:
             self._open_note(results[0])
+
+    # ------------------------------------------------------------------
+    # Keyboard navigation — ↓ / ↑ cycle through result rows
+    # ------------------------------------------------------------------
+
+    def _select_row(self, row: int) -> None:
+        """Highlight row at index without opening the note."""
+        self._data_source.keyboard_navigating = True
+        self._table_view.selectRowIndexes_byExtendingSelection_(
+            NSIndexSet.indexSetWithIndex_(row), False
+        )
+        self._data_source.keyboard_navigating = False
+        self._table_view.scrollRowToVisible_(row)
+
+    def _select_next_result(self) -> None:
+        n = len(self._data_source.results())
+        if n == 0:
+            return
+        row = self._table_view.selectedRow()
+        next_row = (row + 1) if 0 <= row < n - 1 else 0
+        self._select_row(next_row)
+
+    def _select_prev_result(self) -> None:
+        n = len(self._data_source.results())
+        if n == 0:
+            return
+        row = self._table_view.selectedRow()
+        prev_row = (row - 1) if row > 0 else n - 1
+        self._select_row(prev_row)
 
     def _open_note(self, result: dict) -> None:
         title_as  = _as_string_lit(result["title"])

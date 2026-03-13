@@ -123,7 +123,10 @@ class NotesSearcher:
             s_min, s_max = sem_scores.min(), sem_scores.max()
             sem_norm = (sem_scores - s_min) / (s_max - s_min + 1e-10)
             kw_scores = np.array([self._keyword_score(query, note) for note in metadata])
-            scores = 0.5 * sem_norm + 0.5 * kw_scores
+
+            # Smart weighting: specific lookups lean keyword, exploratory leans semantic
+            kw_w = self._query_keyword_weight(query)
+            scores = (1.0 - kw_w) * sem_norm + kw_w * kw_scores
 
         else:  # semantic (default)
             query_vec = _vec()
@@ -156,15 +159,77 @@ class NotesSearcher:
         return normed @ query_norm
 
     def _keyword_score(self, query: str, note: dict) -> float:
-        text = (note["title"] + " " + note["content"]).lower()
-        q    = query.lower()
+        content_lower = note["content"].lower()
+        title_lower = note["title"].lower()
+        text = title_lower + " " + content_lower
+        q = query.lower()
 
+        # Exact phrase match in full text
         if q in text:
             return 1.0
 
-        words = q.split()
-        hits  = sum(1 for w in words if w in text)
-        return hits / len(words) if words else 0.0
+        words = [w for w in q.split() if len(w) > 1]  # drop single chars
+        if not words:
+            return 0.0
+
+        hits = sum(1 for w in words if w in text)
+        base = hits / len(words)
+
+        # Conjunction bonus: ALL words present → strong signal of relevance
+        if hits == len(words) and len(words) >= 2:
+            base = min(1.0, base + 0.3)
+
+        # Title match bonus: words in title are high-signal
+        title_hits = sum(1 for w in words if w in title_lower)
+        if title_hits > 0:
+            base = min(1.0, base + 0.15 * title_hits / len(words))
+
+        return base
+
+    def _query_keyword_weight(self, query: str) -> float:
+        """Analyze query to determine keyword vs semantic balance.
+
+        Returns keyword weight (0.0–1.0). Semantic weight = 1 - this.
+
+        Specific lookups (names, possessives, numbers) lean keyword-heavy.
+        Exploratory/thematic queries lean semantic-heavy.
+        """
+        words = query.split()
+        signals = 0
+
+        # Possessive → looking for a specific person's thing
+        if "\u2019s " in query or "'s " in query:
+            signals += 2
+
+        # Proper nouns (capitalized words after the first)
+        for w in words[1:]:
+            if len(w) > 1 and w[0].isupper():
+                signals += 1
+
+        # First word capitalized + not a common sentence starter
+        if words and words[0][0].isupper() and words[0].lower() not in {
+            "what", "where", "when", "how", "why", "which", "who",
+            "find", "show", "get", "list", "search", "tell", "give",
+            "have", "do", "did", "is", "are", "was", "were", "the",
+            "that", "this", "my", "a", "an", "any", "all", "every",
+        }:
+            signals += 1
+
+        # Contains digits (dates, phone numbers, addresses)
+        if any(c.isdigit() for c in query):
+            signals += 2
+
+        # Short specific query (1-3 words) → likely a lookup
+        if len(words) <= 3:
+            signals += 1
+
+        # Quoted phrases
+        if '"' in query or '\u201c' in query:
+            signals += 2
+
+        # Map: 0 signals → 0.3 keyword (semantic-heavy),
+        #       5+ signals → 0.8 keyword (keyword-heavy)
+        return min(0.8, 0.3 + signals * 0.1)
 
     def _get_embedding(self, query: str) -> np.ndarray:
         """Returns query embedding, using LRU cache to avoid redundant API calls."""
@@ -232,7 +297,7 @@ class NotesSearcher:
 
         return vec
 
-    def _make_snippet(self, content: str, n_chars: int = 80) -> str:
+    def _make_snippet(self, content: str, n_chars: int = 160) -> str:
         """First ≤n_chars of content, truncated to a word boundary."""
         content = content.strip()
         if len(content) <= n_chars:

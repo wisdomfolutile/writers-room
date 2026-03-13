@@ -8,6 +8,7 @@ Search logic copied verbatim from server.py.
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -132,6 +133,14 @@ class NotesSearcher:
             query_vec = _vec()
             scores = self._cosine_similarity(query_vec, embeddings)
 
+        # Date-aware filtering: penalize notes outside requested year range
+        year_range = self._extract_year_filter(query)
+        if year_range:
+            for i, note in enumerate(metadata):
+                year = self._note_year(note)
+                if year is None or not (year_range[0] <= year <= year_range[1]):
+                    scores[i] *= 0.05
+
         top_indices = np.argsort(scores)[::-1][:n]
 
         results = []
@@ -185,6 +194,28 @@ class NotesSearcher:
             base = min(1.0, base + 0.15 * title_hits / len(words))
 
         return base
+
+    def _extract_year_filter(self, query: str) -> tuple[int, int] | None:
+        """Detect year references in query. Returns (start, end) or None."""
+        # "between 2023 and 2025"
+        m = re.search(r'between\s+(20\d{2})\s+and\s+(20\d{2})', query, re.I)
+        if m:
+            return (int(m.group(1)), int(m.group(2)))
+        # "from 2023 to 2025"
+        m = re.search(r'from\s+(20\d{2})\s+to\s+(20\d{2})', query, re.I)
+        if m:
+            return (int(m.group(1)), int(m.group(2)))
+        # Single year: "in 2024", "2024", "during 2024"
+        m = re.search(r'\b(20\d{2})\b', query)
+        if m:
+            y = int(m.group(1))
+            return (y, y)
+        return None
+
+    def _note_year(self, note: dict) -> int | None:
+        """Extract year from note's created date string."""
+        m = re.search(r'\b(20\d{2})\b', note.get('created', ''))
+        return int(m.group(1)) if m else None
 
     def _query_keyword_weight(self, query: str) -> float:
         """Analyze query to determine keyword vs semantic balance.

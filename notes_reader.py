@@ -3,6 +3,7 @@ Reads notes from Apple Notes via AppleScript.
 
 Uses batch property access per folder (one AppleEvent per folder, not per note)
 and writes to a temp file to avoid O(n²) string concatenation in AppleScript.
+For large folders, reads in chunks to avoid AppleEvent memory/timeout limits.
 """
 
 import subprocess
@@ -13,6 +14,68 @@ from bs4 import BeautifulSoup
 
 FIELD_SEP = "~~WRROOM~~"
 NOTE_END = "~~NOTEEND~~"
+
+# Max notes per AppleScript call — keeps memory and time per call manageable
+APPLESCRIPT_CHUNK_SIZE = 200
+
+
+def _make_count_script(folder_name: str, account_name: str) -> str:
+    """AppleScript to count notes in a folder, accessed via account."""
+    ef = folder_name.replace('"', '\\"')
+    ea = account_name.replace('"', '\\"')
+    return f"""
+with timeout of 120 seconds
+    tell application "Notes"
+        try
+            return count of notes of folder "{ef}" of account "{ea}"
+        on error
+            return 0
+        end try
+    end tell
+end timeout
+"""
+
+
+def _make_chunk_script(output_path: str, folder_name: str, account_name: str, start_idx: int, end_idx: int) -> str:
+    """
+    AppleScript that reads notes start_idx through end_idx (1-based, inclusive)
+    from a named folder, appending delimited records to output_path.
+    Uses native range specifier (notes X through Y) which supports batch
+    property access, unlike list slicing.
+    """
+    ef = folder_name.replace('"', '\\"')
+    ea = account_name.replace('"', '\\"')
+    return f"""
+set outputPath to "{output_path}"
+set sep to "{FIELD_SEP}"
+set noteEnd to "{NOTE_END}"
+
+set fileRef to open for access POSIX file outputPath with write permission
+
+with timeout of 120 seconds
+    tell application "Notes"
+        try
+            set targetFolder to folder "{ef}" of account "{ea}"
+        on error
+            close access fileRef
+            return
+        end try
+
+        set noteTitles to name of (notes {start_idx} through {end_idx} of targetFolder)
+        set noteMods to modification date of (notes {start_idx} through {end_idx} of targetFolder)
+        set noteCreates to creation date of (notes {start_idx} through {end_idx} of targetFolder)
+        set noteBodies to body of (notes {start_idx} through {end_idx} of targetFolder)
+        set batchCount to count of noteTitles
+
+        repeat with i from 1 to batchCount
+            set rec to "{ef}" & sep & (item i of noteTitles as string) & sep & ((item i of noteMods) as string) & sep & ((item i of noteCreates) as string) & sep & (item i of noteBodies as string) & noteEnd
+            write rec to fileRef starting at eof as «class utf8»
+        end repeat
+    end tell
+end timeout
+
+close access fileRef
+"""
 
 
 def _make_reader_script(output_path: str, folders: list[str] | None = None) -> str:
@@ -55,7 +118,7 @@ tell application "Notes"
                 set noteBodies to body of (every note of aFolder whose password protected is false)
                 repeat with i from 1 to noteCount
                     set rec to folderName & sep & (item i of noteTitles as string) & sep & ((item i of noteMods) as string) & sep & ((item i of noteCreates) as string) & sep & (item i of noteBodies as string) & noteEnd
-                    write rec to fileRef
+                    write rec to fileRef as «class utf8»
                 end repeat
             end if
         end if
@@ -71,21 +134,74 @@ def html_to_text(html: str) -> str:
     return soup.get_text(separator="\n", strip=True)
 
 
-def _read_single_folder(folder_name: str) -> list[dict]:
-    """Read notes from one folder. Returns empty list if the folder errors."""
+def _get_folder_note_count(folder_name: str, account_name: str) -> int:
+    """Return the number of unprotected notes in a folder, or -1 on error."""
+    result = subprocess.run(
+        ["osascript", "-e", _make_count_script(folder_name, account_name)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        return -1
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return -1
+
+
+def _read_single_folder(folder_name: str, account_name: str) -> list[dict]:
+    """
+    Read notes from one folder. Returns empty list if the folder errors.
+    For large folders, reads in chunks of APPLESCRIPT_CHUNK_SIZE to avoid
+    AppleEvent memory/timeout limits.
+    """
+    note_count = _get_folder_note_count(folder_name, account_name)
+    if note_count <= 0:
+        # Fall back to the original single-shot script for small/unknown folders
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w") as tmp:
+            tmp_path = tmp.name
+        try:
+            script = _make_reader_script(tmp_path, folders=[folder_name])
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            if result.returncode != 0:
+                return []
+            raw = Path(tmp_path).read_text(encoding="utf-8", errors="replace")
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+        return _parse_raw(raw)
+
+    # Chunked path for folders with known note count
     with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w") as tmp:
         tmp_path = tmp.name
+    # Initialise the file (chunks will append)
+    Path(tmp_path).write_text("", encoding="utf-8")
 
+    total_chunks = -(-note_count // APPLESCRIPT_CHUNK_SIZE)  # ceiling division
     try:
-        script = _make_reader_script(tmp_path, folders=[folder_name])
-        result = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-        if result.returncode != 0:
-            return []  # silently skip this folder
+        for chunk_num, start in enumerate(range(1, note_count + 1, APPLESCRIPT_CHUNK_SIZE), 1):
+            end = min(start + APPLESCRIPT_CHUNK_SIZE - 1, note_count)
+            print(f"    chunk {chunk_num}/{total_chunks} (notes {start}-{end})...", end=" ", flush=True)
+            script = _make_chunk_script(tmp_path, folder_name, account_name, start, end)
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if result.returncode != 0:
+                err = result.stderr.strip()[:120] if result.stderr else "unknown error"
+                print(f"FAILED: {err}")
+                break
+            print("ok")
         raw = Path(tmp_path).read_text(encoding="utf-8", errors="replace")
     finally:
         try:
@@ -93,6 +209,10 @@ def _read_single_folder(folder_name: str) -> list[dict]:
         except FileNotFoundError:
             pass
 
+    return _parse_raw(raw)
+
+
+def _parse_raw(raw: str) -> list[dict]:
     notes = []
     for record in raw.split(NOTE_END):
         record = record.strip()
@@ -141,7 +261,8 @@ def read_notes(
     Returns:
         List of note dicts with: id, folder, title, modified, created, content
     """
-    target_folders = folders if folders is not None else get_folder_names()
+    folder_account_map = get_folder_account_map()
+    target_folders = folders if folders is not None else list(folder_account_map.keys())
 
     all_notes = []
     skipped = []
@@ -150,7 +271,8 @@ def read_notes(
         if verbose:
             print(f"  [{i}/{len(target_folders)}] {folder_name}...", end=" ", flush=True)
 
-        notes = _read_single_folder(folder_name)
+        account_name = folder_account_map.get(folder_name, "iCloud")
+        notes = _read_single_folder(folder_name, account_name)
 
         if verbose:
             if notes:
@@ -173,18 +295,40 @@ def read_all_notes(verbose: bool = False) -> list[dict]:
     return read_notes(verbose=verbose)
 
 
+def get_folder_account_map() -> dict[str, str]:
+    """
+    Return a mapping of {folder_name: account_name} for all folders.
+    Uses batch property access per account (fast), then combines in Python.
+    """
+    # Step 1: get account names
+    acct_result = subprocess.run(
+        ["osascript", "-e", 'tell application "Notes" to return name of every account'],
+        capture_output=True, text=True, timeout=30,
+    )
+    if acct_result.returncode != 0:
+        raise RuntimeError(f"AppleScript failed: {acct_result.stderr.strip()}")
+    account_names = [a.strip() for a in acct_result.stdout.strip().split(",") if a.strip()]
+
+    mapping: dict[str, str] = {}
+    for acct_name in account_names:
+        escaped = acct_name.replace('"', '\\"')
+        folder_result = subprocess.run(
+            ["osascript", "-e",
+             f'tell application "Notes" to return name of every folder of account "{escaped}"'],
+            capture_output=True, text=True, timeout=30,
+        )
+        if folder_result.returncode != 0:
+            continue
+        for fname in folder_result.stdout.strip().split(","):
+            fname = fname.strip()
+            if fname:
+                mapping[fname] = acct_name
+    return mapping
+
+
 def get_folder_names() -> list[str]:
     """Get all folder names quickly, without reading notes."""
-    result = subprocess.run(
-        ["osascript", "-e", 'tell application "Notes" to return name of every folder'],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"AppleScript failed: {result.stderr.strip()}")
-    raw = result.stdout.strip()
-    return [f.strip() for f in raw.split(",") if f.strip()]
+    return list(get_folder_account_map().keys())
 
 
 if __name__ == "__main__":

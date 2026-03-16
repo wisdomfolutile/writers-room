@@ -522,15 +522,26 @@ class _ResultsDataSource(NSObject):
     def tableViewSelectionDidChange_(self, notification) -> None:
         tv  = notification.object()
         row = tv.selectedRow()
-        if 0 <= row < len(self._results):
-            if self.keyboard_navigating:
-                # Arrow-key navigation: just highlight, don't open
-                tv.scrollRowToVisible_(row)
-            elif self.on_open:
-                # Mouse click: open immediately and deselect
-                result = self._results[row]
-                tv.deselectAll_(None)
-                self.on_open(result)
+        if row < 0 or row >= len(self._results):
+            return
+        if self.keyboard_navigating:
+            # Arrow-key navigation: just highlight, don't open
+            tv.scrollRowToVisible_(row)
+            return
+        if _ResultCell._button_just_clicked:
+            # The ↗ button already opened the note — just clear selection quietly.
+            _ResultCell._button_just_clicked = False
+            self.keyboard_navigating = True      # suppress recursive notification
+            tv.deselectAll_(None)
+            self.keyboard_navigating = False
+            return
+        if self.on_open:
+            # Mouse click on the row itself: open and deselect
+            result = self._results[row]
+            self.keyboard_navigating = True      # suppress recursive notification
+            tv.deselectAll_(None)
+            self.keyboard_navigating = False
+            self.on_open(result)
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +553,9 @@ _CHIP_FONT    = NSFont.monospacedSystemFontOfSize_weight_(10, 0)
 
 
 class _ResultCell(NSView):
+    # Class-level flag: set True when the ↗ button fires, so the
+    # table's selectionDidChange handler knows to skip the duplicate open.
+    _button_just_clicked: bool = False
 
     def initWithFrame_(self, frame):
         self = objc.super(_ResultCell, self).initWithFrame_(frame)
@@ -653,6 +667,7 @@ class _ResultCell(NSView):
 
     @objc.IBAction
     def openInNotesFromButton_(self, sender) -> None:
+        _ResultCell._button_just_clicked = True
         if self._result and self._open_callback:
             self._open_callback(self._result)
 
@@ -1122,6 +1137,7 @@ class SearchPanel:
     def _open_note_by_title(self, title: str) -> None:
         """Open a note by title — used when user clicks a [[link]] in the synthesis.
         The AI may not reproduce the exact title, so we fall back to fuzzy matching.
+        If nothing in the current results matches, try AppleScript by title alone.
         """
         results = self._data_source.results()
         t = title.strip().lower()
@@ -1141,6 +1157,23 @@ class SearchPanel:
             if t in rt or rt in t:
                 self._open_note(r)
                 return
+        # 4. Fallback — search across all accounts by title alone
+        self._open_note_by_title_direct(title)
+
+    def _open_note_by_title_direct(self, title: str) -> None:
+        """Last resort: ask Notes to show the first note matching this title."""
+        title_as = _as_string_lit(title)
+        script = (
+            f'tell application "Notes"\n'
+            f'  repeat with acct in every account\n'
+            f'    try\n'
+            f'      show (first note of acct whose name is {title_as})\n'
+            f'      return\n'
+            f'    end try\n'
+            f'  end repeat\n'
+            f'end tell'
+        )
+        subprocess.Popen(["osascript", "-e", script])
 
     # ------------------------------------------------------------------
     # Open note
@@ -1189,8 +1222,15 @@ class SearchPanel:
     def _open_note(self, result: dict) -> None:
         title_as  = _as_string_lit(result["title"])
         folder_as = _as_string_lit(result["folder"])
+        # Iterate all accounts — a bare `folder "X"` fails for non-default accounts
         script = (
-            f'tell application "Notes" '
-            f'to show (first note of folder {folder_as} whose name is {title_as})'
+            f'tell application "Notes"\n'
+            f'  repeat with acct in every account\n'
+            f'    try\n'
+            f'      show (first note of folder {folder_as} of acct whose name is {title_as})\n'
+            f'      return\n'
+            f'    end try\n'
+            f'  end repeat\n'
+            f'end tell'
         )
         subprocess.Popen(["osascript", "-e", script])

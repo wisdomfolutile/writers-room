@@ -109,31 +109,58 @@ class NotesSearcher:
         embeddings = self._embeddings
         metadata   = self._metadata
 
+        # ── Folder-aware filtering ──────────────────────────────────
+        # Detect "in my Products folder", "from Ideas", etc.
+        # If matched, hard-filter to that folder and strip the reference
+        # from the embedding query so semantics focus on the actual topic.
+        folder_match = self._extract_folder_filter(query, metadata)
+        embed_query = query
+        if folder_match:
+            embed_query = folder_match["clean_query"]
+
         # Choose embedding strategy
         def _vec():
             if use_hyde:
-                return self._get_embedding_hyde(query)
-            return self._get_embedding(query)
+                return self._get_embedding_hyde(embed_query)
+            return self._get_embedding(embed_query)
 
         if mode == "keyword":
-            scores = np.array([self._keyword_score(query, note) for note in metadata])
+            scores = np.array([self._keyword_score(embed_query, note) for note in metadata])
 
         elif mode == "hybrid":
             query_vec = _vec()
             sem_scores = self._cosine_similarity(query_vec, embeddings)
             s_min, s_max = sem_scores.min(), sem_scores.max()
             sem_norm = (sem_scores - s_min) / (s_max - s_min + 1e-10)
-            kw_scores = np.array([self._keyword_score(query, note) for note in metadata])
+            kw_scores = np.array([self._keyword_score(embed_query, note) for note in metadata])
 
             # Smart weighting: specific lookups lean keyword, exploratory leans semantic
-            kw_w = self._query_keyword_weight(query)
+            kw_w = self._query_keyword_weight(embed_query)
             scores = (1.0 - kw_w) * sem_norm + kw_w * kw_scores
 
         else:  # semantic (default)
             query_vec = _vec()
             scores = self._cosine_similarity(query_vec, embeddings)
 
-        # Date-aware filtering: penalize notes outside requested year range
+        # ── Folder filter ───────────────────────────────────────────
+        if folder_match:
+            target = folder_match["folder"].lower()
+            for i, note in enumerate(metadata):
+                if note["folder"].lower() != target:
+                    scores[i] = -1.0  # hard exclude
+
+        # ── Content quality gate ────────────────────────────────────
+        # Notes with trivially short content are almost never useful.
+        for i, note in enumerate(metadata):
+            clen = len(note["content"].strip())
+            if clen < 10:
+                scores[i] *= 0.01   # near-zero: "1", phone numbers, empty
+            elif clen < 30:
+                scores[i] *= 0.15   # heavy penalty: single-line stubs
+            elif clen < 60:
+                scores[i] *= 0.5    # moderate penalty: very short notes
+
+        # ── Date-aware filtering ────────────────────────────────────
         year_range = self._extract_year_filter(query)
         if year_range:
             for i, note in enumerate(metadata):
@@ -143,10 +170,15 @@ class NotesSearcher:
 
         top_indices = np.argsort(scores)[::-1][:n]
 
+        # ── Score floor ─────────────────────────────────────────────
+        # Don't return results that are clearly irrelevant.
+        min_score = 0.1 if mode == "keyword" else 0.01
         results = []
         for idx in top_indices:
-            note  = metadata[idx]
             score = float(scores[idx])
+            if score < min_score:
+                continue
+            note = metadata[idx]
             results.append({
                 "title":   note["title"],
                 "folder":  note["folder"],
@@ -194,6 +226,52 @@ class NotesSearcher:
             base = min(1.0, base + 0.15 * title_hits / len(words))
 
         return base
+
+    # ------------------------------------------------------------------
+    # Folder detection
+    # ------------------------------------------------------------------
+
+    # Patterns that reference a folder. Group 1 captures the folder name.
+    # Order matters — more specific patterns first; the last pattern ("from X")
+    # only fires if the candidate matches a real folder name (checked in the method).
+    _FOLDER_PATTERNS = [
+        re.compile(r'\b(?:in|from|inside)\s+(?:my\s+)?["\u201c]?(.+?)["\u201d]?\s+folder\b', re.I),
+        re.compile(r'\b(?:in|from|inside)\s+(?:the\s+)?["\u201c]?(.+?)["\u201d]?\s+folder\b', re.I),
+        re.compile(r'\bfolder\s+["\u201c]?(.+?)["\u201d]?\b', re.I),
+        # Bare "from X" / "in X" — only triggers if X is a known folder
+        re.compile(r'\b(?:in|from)\s+(?:my\s+)?["\u201c]?(.+?)["\u201d]?\s*$', re.I),
+    ]
+
+    def _extract_folder_filter(self, query: str, metadata: list[dict]) -> dict | None:
+        """
+        Detect a folder reference in the query and match it to a real folder.
+        Returns {"folder": "PRODUCTS", "clean_query": "..."} or None.
+        """
+        all_folders = list({n["folder"] for n in metadata})
+        folder_lower_map = {f.lower(): f for f in all_folders}
+
+        for pat in self._FOLDER_PATTERNS:
+            m = pat.search(query)
+            if not m:
+                continue
+            candidate = m.group(1).strip()
+            cl = candidate.lower()
+
+            # Exact (case-insensitive) match
+            if cl in folder_lower_map:
+                clean = (query[:m.start()] + query[m.end():]).strip()
+                # Strip leftover connectors
+                clean = re.sub(r'^(what|which|are|is|the|best|my)\s+', '', clean, flags=re.I).strip() or clean
+                return {"folder": folder_lower_map[cl], "clean_query": clean or candidate}
+
+            # Substring match — "products" matches "PRODUCTS"
+            for fl, real in folder_lower_map.items():
+                if cl in fl or fl in cl:
+                    clean = (query[:m.start()] + query[m.end():]).strip()
+                    clean = re.sub(r'^(what|which|are|is|the|best|my)\s+', '', clean, flags=re.I).strip() or clean
+                    return {"folder": real, "clean_query": clean or candidate}
+
+        return None
 
     def _extract_year_filter(self, query: str) -> tuple[int, int] | None:
         """Detect year references in query. Returns (start, end) or None."""

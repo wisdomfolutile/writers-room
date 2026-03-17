@@ -1050,7 +1050,14 @@ class SearchPanel:
         self._debounce_timer.daemon = True
         self._debounce_timer.start()
         if self._current_mode != "keyword":
-            label = "deep search…" if self._prefs.use_hyde else "searching…"
+            import re as _re
+            has_url = bool(_re.search(r'https?://[^\s]+', query))
+            if has_url:
+                label = "reading link…"
+            elif self._prefs.use_hyde:
+                label = "deep search…"
+            else:
+                label = "searching…"
             call_on_main(lambda: self._count_label.setStringValue_(label))
 
     def _set_mode(self, mode: str) -> None:
@@ -1067,21 +1074,39 @@ class SearchPanel:
         n        = self._prefs.n_results
         mode     = self._current_mode
         use_hyde = self._prefs.use_hyde and mode != "keyword"
+
+        # Status callback — updates the count label from the search thread
+        def _on_status(msg: str):
+            call_on_main(lambda m=msg: self._count_label.setStringValue_(m))
+
         try:
-            results = self._searcher.search(query, n=n, mode=mode, use_hyde=use_hyde)
+            results = self._searcher.search(
+                query, n=n, mode=mode, use_hyde=use_hyde,
+                search_depth=self._prefs.search_depth,
+                skip_short_notes=self._prefs.skip_short_notes,
+                excluded_folders=self._prefs.excluded_folders,
+                on_status=_on_status,
+            )
         except Exception as e:
             err = str(e)
             call_on_main(lambda: self._count_label.setStringValue_(f"error: {err}"))
             return
 
+        # Extract brief_summary if present (URL-aware search)
+        brief_summary = None
+        if results and "brief_summary" in results[0]:
+            brief_summary = results[0]["brief_summary"]
+
         n_found    = len(results)
         count_text = f"{n_found} result{'s' if n_found != 1 else ''}"
         _results   = results  # capture for closure
+        _brief     = brief_summary
+        _query     = query
 
         def on_main():
             self._count_label.setStringValue_(count_text)
             self._set_results(_results)
-            self._kick_synthesis(query, _results)
+            self._kick_synthesis(_query, _results, brief_summary=_brief)
 
         call_on_main(on_main)
 
@@ -1094,7 +1119,8 @@ class SearchPanel:
     # Synthesis (second-brain answer)
     # ------------------------------------------------------------------
 
-    def _kick_synthesis(self, query: str, results: list[dict]) -> None:
+    def _kick_synthesis(self, query: str, results: list[dict],
+                        brief_summary: str | None = None) -> None:
         """Must be called on the main thread. Kicks off streaming synthesis."""
         from synthesizer import synthesize_stream
 
@@ -1122,7 +1148,8 @@ class SearchPanel:
                 return
             self._set_answer("")   # fail silently — results are still shown
 
-        synthesize_stream(query, results, on_chunk, on_done, on_error)
+        synthesize_stream(query, results, on_chunk, on_done, on_error,
+                         brief_summary=brief_summary)
 
     def _set_answer(self, text: str, secondary: bool = False) -> None:
         """Update the synthesis text view (must be called on main thread)."""

@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import requests
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -24,6 +26,27 @@ METADATA_FILE   = INDEX_DIR / "metadata.json"
 EMBEDDING_MODEL = "text-embedding-3-small"
 
 LRU_MAX = 50  # cached query embeddings
+
+# URL detection — matches http/https URLs in query text
+_URL_RE = re.compile(r'https?://[^\s<>"\']+')
+
+# URL distillation prompt — extracts search themes from a fetched page
+_URL_DISTILL_SYSTEM = """\
+You are helping a writer search their personal notes library.
+
+They want to find existing work that could match this external page (a submission call, \
+prompt, article, theme, etc.). Extract the core creative themes, subjects, emotions, \
+and ideas that a writer's notes might touch on.
+
+Return a JSON object (no markdown fencing):
+{
+  "search_query": "5-15 words: core themes, emotions, subjects to search for in the writer's notes",
+  "brief_summary": "One sentence: what this page is about or looking for"
+}
+
+Focus search_query on themes a writer would explore in personal notes — \
+NOT logistics (deadlines, word counts, submission guidelines, formatting rules).\
+"""
 
 # HyDE system prompt — tells the model to write a plausible note excerpt
 _HYDE_SYSTEM = (
@@ -49,6 +72,9 @@ class NotesSearcher:
         # LRU embedding cache: dict for fast lookup, list for order
         self._cache: dict[str, np.ndarray] = {}
         self._cache_order: list[str] = []
+
+        # URL distillation cache: url → {"search_query": ..., "brief_summary": ...}
+        self._url_cache: dict[str, dict] = {}
 
     # ------------------------------------------------------------------
     # Index management
@@ -88,13 +114,19 @@ class NotesSearcher:
     # ------------------------------------------------------------------
 
     def search(self, query: str, n: int = 5, mode: str = "semantic",
-               use_hyde: bool = False) -> list[dict]:
+               use_hyde: bool = False, search_depth: int = 50,
+               skip_short_notes: bool = True,
+               excluded_folders: list[str] | None = None,
+               on_status: "Callable[[str], None] | None" = None) -> list[dict]:
         """
         Search the index. Returns a list of result dicts:
             { title, folder, content, snippet, score }
 
-        use_hyde: embed a GPT-generated hypothetical note instead of the raw query.
-                  Dramatically improves recall for conversational / reflective queries.
+        use_hyde:          embed a hypothetical note instead of the raw query.
+        search_depth:      0 = literal/keyword-heavy, 100 = deep semantic.
+        skip_short_notes:  filter out trivially short notes.
+        excluded_folders:  folder names to exclude from results.
+        on_status:         optional callback for status updates (e.g. "Reading link…").
 
         Safe to call from a background thread.
         Raises RuntimeError if index has not been loaded.
@@ -108,6 +140,27 @@ class NotesSearcher:
 
         embeddings = self._embeddings
         metadata   = self._metadata
+
+        # ── URL-aware search ─────────────────────────────────────────
+        # If the query contains a URL, fetch the page, distill themes,
+        # and use the synthesized query for search.
+        brief_summary = None
+        url_match = _URL_RE.search(query)
+        if url_match:
+            url = url_match.group(0)
+            user_context = _URL_RE.sub("", query).strip()
+            # Strip common connectors left after URL removal
+            user_context = re.sub(
+                r'^(any|do i have|related to|matching|for|this|that|:|\s)+',
+                '', user_context, flags=re.I,
+            ).strip()
+
+            resolved = self._resolve_url(url, user_context, on_status)
+            if resolved:
+                query = resolved["search_query"]
+                brief_summary = resolved["brief_summary"]
+                if on_status:
+                    on_status("searching…")
 
         # ── Folder-aware filtering ──────────────────────────────────
         # Detect "in my Products folder", "from Ideas", etc.
@@ -134,15 +187,26 @@ class NotesSearcher:
             sem_norm = (sem_scores - s_min) / (s_max - s_min + 1e-10)
             kw_scores = np.array([self._keyword_score(embed_query, note) for note in metadata])
 
-            # Smart weighting: specific lookups lean keyword, exploratory leans semantic
+            # Smart weighting: query analysis determines a base keyword weight,
+            # then search_depth shifts it — low depth → keyword-heavy, high → semantic.
             kw_w = self._query_keyword_weight(embed_query)
+            # search_depth 0→+0.3 to kw_w (more keyword), 100→-0.3 (more semantic)
+            depth_shift = 0.3 - (search_depth / 100.0) * 0.6
+            kw_w = max(0.05, min(0.95, kw_w + depth_shift))
             scores = (1.0 - kw_w) * sem_norm + kw_w * kw_scores
 
         else:  # semantic (default)
             query_vec = _vec()
             scores = self._cosine_similarity(query_vec, embeddings)
 
-        # ── Folder filter ───────────────────────────────────────────
+        # ── Excluded folders ─────────────────────────────────────────
+        excluded = {f.lower() for f in (excluded_folders or [])}
+        if excluded:
+            for i, note in enumerate(metadata):
+                if note["folder"].lower() in excluded:
+                    scores[i] = -1.0
+
+        # ── Folder filter (query-detected) ──────────────────────────
         if folder_match:
             target = folder_match["folder"].lower()
             for i, note in enumerate(metadata):
@@ -150,15 +214,15 @@ class NotesSearcher:
                     scores[i] = -1.0  # hard exclude
 
         # ── Content quality gate ────────────────────────────────────
-        # Notes with trivially short content are almost never useful.
-        for i, note in enumerate(metadata):
-            clen = len(note["content"].strip())
-            if clen < 10:
-                scores[i] *= 0.01   # near-zero: "1", phone numbers, empty
-            elif clen < 30:
-                scores[i] *= 0.15   # heavy penalty: single-line stubs
-            elif clen < 60:
-                scores[i] *= 0.5    # moderate penalty: very short notes
+        if skip_short_notes:
+            for i, note in enumerate(metadata):
+                clen = len(note["content"].strip())
+                if clen < 10:
+                    scores[i] *= 0.01   # near-zero: "1", phone numbers, empty
+                elif clen < 30:
+                    scores[i] *= 0.15   # heavy penalty: single-line stubs
+                elif clen < 60:
+                    scores[i] *= 0.5    # moderate penalty: very short notes
 
         # ── Date-aware filtering ────────────────────────────────────
         year_range = self._extract_year_filter(query)
@@ -179,13 +243,16 @@ class NotesSearcher:
             if score < min_score:
                 continue
             note = metadata[idx]
-            results.append({
+            result = {
                 "title":   note["title"],
                 "folder":  note["folder"],
                 "content": note["content"],
                 "snippet": self._make_snippet(note["content"]),
                 "score":   score,
-            })
+            }
+            if brief_summary:
+                result["brief_summary"] = brief_summary
+            results.append(result)
 
         return results
 
@@ -226,6 +293,87 @@ class NotesSearcher:
             base = min(1.0, base + 0.15 * title_hits / len(words))
 
         return base
+
+    # ------------------------------------------------------------------
+    # URL resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_url(self, url: str, user_context: str,
+                     on_status: "Callable[[str], None] | None" = None) -> dict | None:
+        """
+        Fetch a URL, distill its themes via GPT-4o-mini, return
+        {"search_query": "...", "brief_summary": "..."} or None on failure.
+        Results are cached by URL.
+        """
+        # Check cache first
+        if url in self._url_cache:
+            return self._url_cache[url]
+
+        if on_status:
+            on_status("reading link…")
+
+        page_text = self._fetch_page_text(url)
+        if not page_text:
+            return None  # fetch failed — fall back to raw query
+
+        if on_status:
+            on_status("analyzing brief…")
+
+        # Truncate page text to ~3000 chars to keep tokens low
+        page_text = page_text[:3000]
+
+        user_msg = ""
+        if user_context:
+            user_msg = f'The writer said: "{user_context}"\n\n'
+        user_msg += f"Here is the content from the linked page:\n---\n{page_text}\n---"
+
+        try:
+            resp = self._client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": _URL_DISTILL_SYSTEM},
+                    {"role": "user", "content": user_msg},
+                ],
+                max_tokens=150,
+                temperature=0.3,
+            )
+            raw = resp.choices[0].message.content.strip()
+            # Strip markdown code fences if present
+            if raw.startswith("```"):
+                raw = re.sub(r'^```\w*\n?', '', raw)
+                raw = re.sub(r'\n?```$', '', raw)
+            result = json.loads(raw)
+
+            # Validate expected keys
+            if "search_query" in result and "brief_summary" in result:
+                self._url_cache[url] = result
+                return result
+        except Exception:
+            pass  # JSON parse or API error — fall back to raw query
+
+        return None
+
+    @staticmethod
+    def _fetch_page_text(url: str) -> str | None:
+        """Fetch a URL and extract readable text. Returns None on failure."""
+        try:
+            resp = requests.get(url, timeout=10, headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+                ),
+            })
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+            # Remove nav, footer, script, style elements
+            for tag in soup(["nav", "footer", "script", "style", "header", "aside"]):
+                tag.decompose()
+            text = soup.get_text(separator="\n", strip=True)
+            # Collapse multiple blank lines
+            text = re.sub(r'\n{3,}', '\n\n', text)
+            return text if text else None
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # Folder detection

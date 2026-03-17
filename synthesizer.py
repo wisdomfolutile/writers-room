@@ -43,6 +43,7 @@ def synthesize_stream(
     on_chunk,
     on_done,
     on_error,
+    brief_summary: str | None = None,
 ) -> None:
     """
     Start a background thread that streams a synthesis answer.
@@ -54,7 +55,7 @@ def synthesize_stream(
     """
     threading.Thread(
         target=_run,
-        args=(query, results, on_chunk, on_done, on_error),
+        args=(query, results, on_chunk, on_done, on_error, brief_summary),
         daemon=True,
     ).start()
 
@@ -63,7 +64,8 @@ def synthesize_stream(
 # Internal
 # ---------------------------------------------------------------------------
 
-def _run(query, results, on_chunk, on_done, on_error) -> None:
+def _run(query, results, on_chunk, on_done, on_error,
+         brief_summary=None) -> None:
     try:
         client = OpenAI()
 
@@ -74,14 +76,22 @@ def _run(query, results, on_chunk, on_done, on_error) -> None:
             for r in results[:8]
         )
 
+        # If this is a URL-aware search, give the synthesizer richer context
+        if brief_summary:
+            user_content = (
+                f"The writer is looking for notes that match this external brief:\n"
+                f"Brief: {brief_summary}\n\n"
+                f"Their original query: {query}\n\n"
+                f"Relevant notes:\n\n{notes_text}"
+            )
+        else:
+            user_content = f"Question: {query}\n\nRelevant notes:\n\n{notes_text}"
+
         stream = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": f"Question: {query}\n\nRelevant notes:\n\n{notes_text}",
-                },
+                {"role": "user", "content": user_content},
             ],
             max_tokens=250,
             temperature=0.7,

@@ -37,7 +37,7 @@ client = OpenAI()
 def load_index() -> tuple[np.ndarray, list[dict]]:
     if EMBEDDINGS_FILE.exists() and METADATA_FILE.exists():
         embeddings = np.load(EMBEDDINGS_FILE)
-        with open(METADATA_FILE) as f:
+        with open(METADATA_FILE, encoding='utf-8') as f:
             metadata = json.load(f)
         return embeddings, metadata
     return np.array([]).reshape(0, 0), []
@@ -46,7 +46,7 @@ def load_index() -> tuple[np.ndarray, list[dict]]:
 def save_index(embeddings: np.ndarray, metadata: list[dict]) -> None:
     INDEX_DIR.mkdir(exist_ok=True)
     np.save(EMBEDDINGS_FILE, embeddings)
-    with open(METADATA_FILE, "w") as f:
+    with open(METADATA_FILE, "w", encoding='utf-8') as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
 
 
@@ -74,6 +74,7 @@ def build_text_for_embedding(note: dict) -> str:
 def run_index(
     force: bool = False,
     folders: list[str] | None = None,
+    on_progress=None,
 ) -> tuple[int, int]:
     """
     Build or update the search index, saving after each folder.
@@ -82,6 +83,8 @@ def run_index(
     Args:
         force: Re-embed even unchanged notes.
         folders: If set, only process these folders. Others are kept as-is.
+        on_progress: Optional callback(folder_index, total_folders, folder_name, notes_so_far, embedded_so_far)
+                     called after each folder is processed.
 
     Returns:
         (total_indexed, num_updated)
@@ -102,6 +105,7 @@ def run_index(
         print("\nReading notes from Apple Notes (all folders)...")
 
     total_updated = 0
+    notes_so_far = 0
 
     for folder_idx, folder_name in enumerate(target_folders, 1):
         print(f"  [{folder_idx}/{len(target_folders)}] {folder_name}...", end=" ", flush=True)
@@ -110,6 +114,8 @@ def run_index(
 
         if not folder_notes:
             print("skipped")
+            if on_progress:
+                on_progress(folder_idx, len(target_folders), folder_name, notes_so_far, total_updated)
             continue
 
         # Split into unchanged (reuse embedding) vs needs embedding
@@ -133,6 +139,8 @@ def run_index(
             new_embeddings = [np.array(e, dtype=np.float32) for e in embed_texts(texts)]
             total_updated += len(to_embed)
 
+        notes_so_far += len(folder_notes)
+
         # Merge this folder's results into the existing index
         # Remove any old entries for this folder, then add fresh ones
         existing_embeddings, existing_metadata = load_index()
@@ -154,6 +162,9 @@ def run_index(
         # Refresh lookup for next iteration
         existing_embeddings, existing_metadata = load_index()
         existing_by_id = {m["id"]: (i, m) for i, m in enumerate(existing_metadata)}
+
+        if on_progress:
+            on_progress(folder_idx, len(target_folders), folder_name, notes_so_far, total_updated)
 
     elapsed = time.time() - start
     _, final_metadata = load_index()

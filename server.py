@@ -10,9 +10,12 @@ Tools:
 
 import asyncio
 import json
+import re
 from pathlib import Path
 
 import numpy as np
+import requests
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -42,7 +45,7 @@ def load_index() -> tuple[np.ndarray, list[dict]]:
                 "Index not found. Run: python3 indexer.py"
             )
         _embeddings = np.load(EMBEDDINGS_FILE)
-        with open(METADATA_FILE) as f:
+        with open(METADATA_FILE, encoding='utf-8') as f:
             _metadata = json.load(f)
     return _embeddings, _metadata
 
@@ -79,6 +82,72 @@ def keyword_score(query: str, note: dict) -> float:
     words = q.split()
     hits = sum(1 for w in words if w in text)
     return hits / len(words) if words else 0.0
+
+
+# ── URL resolution for MCP ────────────────────────────────────────────
+
+_URL_DISTILL_SYSTEM = (
+    "You are helping a writer search their personal notes library.\n\n"
+    "They want to find existing work that could match this external page (a submission call, "
+    "prompt, article, theme, etc.). Extract the core creative themes, subjects, emotions, "
+    "and ideas that a writer's notes might touch on.\n\n"
+    "Return a JSON object (no markdown fencing):\n"
+    '{\n  "search_query": "5-15 words: core themes, emotions, subjects to search for",\n'
+    '  "brief_summary": "One sentence: what this page is about or looking for"\n}\n\n'
+    "Focus search_query on themes a writer would explore in personal notes — "
+    "NOT logistics (deadlines, word counts, submission guidelines)."
+)
+
+_url_cache: dict[str, dict] = {}
+
+
+def _resolve_url_for_mcp(url: str, user_context: str) -> dict | None:
+    """Fetch a URL and distill search themes. Cached by URL."""
+    if url in _url_cache:
+        return _url_cache[url]
+    try:
+        resp = requests.get(url, timeout=10, headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+            ),
+        })
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tag in soup(["nav", "footer", "script", "style", "header", "aside"]):
+            tag.decompose()
+        page_text = soup.get_text(separator="\n", strip=True)[:3000]
+        if not page_text:
+            return None
+    except Exception:
+        return None
+
+    user_msg = ""
+    if user_context:
+        user_msg = f'The writer said: "{user_context}"\n\n'
+    user_msg += f"Here is the content from the linked page:\n---\n{page_text}\n---"
+
+    try:
+        chat = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": _URL_DISTILL_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            max_tokens=150,
+            temperature=0.3,
+        )
+        raw = chat.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = re.sub(r'^```\w*\n?', '', raw)
+            raw = re.sub(r'\n?```$', '', raw)
+        result = json.loads(raw)
+        if "search_query" in result and "brief_summary" in result:
+            _url_cache[url] = result
+            return result
+    except Exception:
+        pass
+    return None
 
 
 @server.list_tools()
@@ -150,6 +219,21 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 
         embeddings, metadata = load_index()
 
+        # ── URL-aware search ─────────────────────────────────────
+        brief_summary = None
+        url_match = re.search(r'https?://[^\s<>"\']+', query)
+        if url_match:
+            url = url_match.group(0)
+            user_context = re.sub(r'https?://[^\s<>"\']+', '', query).strip()
+            user_context = re.sub(
+                r'^(any|do i have|related to|matching|for|this|that|:|\s)+',
+                '', user_context, flags=re.I,
+            ).strip()
+            resolved = _resolve_url_for_mcp(url, user_context)
+            if resolved:
+                query = resolved["search_query"]
+                brief_summary = resolved["brief_summary"]
+
         if mode == "keyword":
             kw_scores = np.array([keyword_score(query, note) for note in metadata])
             scores = kw_scores
@@ -167,7 +251,11 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 
         top_indices = np.argsort(scores)[::-1][:n]
 
-        output_lines = [f"Found {n} notes for: '{query}'\n"]
+        output_lines = []
+        if brief_summary:
+            output_lines.append(f"🔗 URL Brief: {brief_summary}")
+            output_lines.append(f"   Searching for: {query}\n")
+        output_lines.append(f"Found {n} notes for: '{query}'\n")
         for rank, idx in enumerate(top_indices, 1):
             note = metadata[idx]
             score = float(scores[idx])

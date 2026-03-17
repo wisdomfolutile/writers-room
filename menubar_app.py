@@ -12,13 +12,12 @@ import subprocess
 import threading
 from pathlib import Path
 
-import objc
 import rumps
-from AppKit import NSApp, NSApplicationActivationPolicyAccessory
 
 from searcher import NotesSearcher
-from preferences import Preferences, PreferencesWindowController
+from preferences import Preferences, PreferencesWindowController, make_prefs_controller
 from search_panel import SearchPanel
+from utils import call_on_main
 
 
 class WRApp(rumps.App):
@@ -29,9 +28,9 @@ class WRApp(rumps.App):
             title="✦ WR",       # text shown in menu bar (replace with icon path later)
             quit_button=None,   # we add our own Quit item for control
         )
-        self._prefs:       Preferences                   = Preferences()
-        self._searcher:    NotesSearcher                 = NotesSearcher()
-        self._panel:       SearchPanel | None            = None
+        self._prefs:       Preferences                        = Preferences()
+        self._searcher:    NotesSearcher                      = NotesSearcher()
+        self._panel:       SearchPanel | None                 = None
         self._prefs_ctrl:  PreferencesWindowController | None = None
 
         self.menu = [
@@ -49,22 +48,19 @@ class WRApp(rumps.App):
 
     def _start_index_load(self) -> None:
         """Kick off background index load. Called just before the run loop."""
-        thread = threading.Thread(target=self._load_index_bg, daemon=True)
-        thread.start()
+        threading.Thread(target=self._load_index_bg, daemon=True).start()
 
     def _load_index_bg(self) -> None:
         try:
             self._searcher.load_index()
-            objc.callAfter(self._on_index_ready)
+            call_on_main(self._on_index_ready)
         except Exception as e:
-            objc.callAfter(self._on_index_error, str(e))
+            msg = str(e)
+            call_on_main(lambda: self._on_index_error(msg))
 
     def _on_index_ready(self) -> None:
         """Called on main thread once the index is in memory."""
         self._panel = SearchPanel(self._searcher, self._prefs)
-        n = self._searcher.note_count
-        # Optionally update title to show note count
-        # self.title = f"✦ WR ({n})"
 
     def _on_index_error(self, msg: str) -> None:
         rumps.notification(
@@ -91,7 +87,7 @@ class WRApp(rumps.App):
     @rumps.clicked("Preferences…")
     def _open_prefs(self, _) -> None:
         if self._prefs_ctrl is None:
-            self._prefs_ctrl = PreferencesWindowController.create(
+            self._prefs_ctrl = make_prefs_controller(
                 prefs=self._prefs,
                 searcher=self._searcher,
             )
@@ -108,17 +104,15 @@ class WRApp(rumps.App):
             )
             if result.returncode == 0:
                 n = self._searcher.reload_index()
-                objc.callAfter(
-                    rumps.notification,
+                call_on_main(lambda: rumps.notification(
                     "Writers Room", "Re-index complete",
                     f"{n} notes indexed and ready.",
-                )
+                ))
             else:
-                objc.callAfter(
-                    rumps.notification,
-                    "Writers Room", "Re-index failed",
-                    (result.stderr or result.stdout or "Unknown error")[:200],
-                )
+                err = (result.stderr or result.stdout or "Unknown error")[:200]
+                call_on_main(lambda: rumps.notification(
+                    "Writers Room", "Re-index failed", err,
+                ))
 
         threading.Thread(target=run, daemon=True).start()
         rumps.notification(
@@ -136,11 +130,9 @@ class WRApp(rumps.App):
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        # Suppress Dock icon — menu bar only
-        NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
-        # Start background index load
+        # Start background index load before entering the run loop
         self._start_index_load()
-        # Hand off to rumps / NSRunLoop
+        # rumps handles NSApplicationActivationPolicyAccessory automatically
         super().run()
 
 

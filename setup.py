@@ -45,6 +45,7 @@ OPTIONS = {
         "searcher",
         "preferences",
         "search_panel",
+        "synthesizer",
         "utils",
     ],
     # Don't strip debug info (keeps tracebacks readable)

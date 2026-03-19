@@ -162,12 +162,27 @@ class NotesSearcher:
                 if on_status:
                     on_status("searching…")
 
+        # ── Temporal-aware filtering ──────────────────────────────────
+        # Detect "December 2023", "last summer", etc.
+        # Strip temporal references from embed_query so semantics focus on
+        # the actual topic, not the words "December" or "2023".
+        temporal = self._extract_temporal_filter(query)
+        embed_query = query
+        is_pure_temporal = False
+        if temporal:
+            if temporal["clean_query"]:
+                embed_query = temporal["clean_query"]
+            else:
+                # Pure temporal query like "what was I thinking in December 2023"
+                # — no topical content left. Score by content length (quality proxy)
+                # instead of embedding similarity.
+                is_pure_temporal = True
+
         # ── Folder-aware filtering ──────────────────────────────────
         # Detect "in my Products folder", "from Ideas", etc.
         # If matched, hard-filter to that folder and strip the reference
         # from the embedding query so semantics focus on the actual topic.
-        folder_match = self._extract_folder_filter(query, metadata)
-        embed_query = query
+        folder_match = self._extract_folder_filter(embed_query, metadata)
         if folder_match:
             embed_query = folder_match["clean_query"]
 
@@ -177,7 +192,17 @@ class NotesSearcher:
                 return self._get_embedding_hyde(embed_query)
             return self._get_embedding(embed_query)
 
-        if mode == "keyword":
+        if is_pure_temporal:
+            # No semantic content to embed — rank by note substance instead.
+            # Score = log(content_length) normalized, so longer/richer notes
+            # surface first. The temporal filter below will gate to the date range.
+            lengths = np.array([len(note["content"]) for note in metadata], dtype=np.float32)
+            scores = np.log1p(lengths)
+            s_max = scores.max()
+            if s_max > 0:
+                scores /= s_max  # normalize to [0, 1]
+
+        elif mode == "keyword":
             scores = np.array([self._keyword_score(embed_query, note) for note in metadata])
 
         elif mode == "hybrid":
@@ -213,6 +238,29 @@ class NotesSearcher:
                 if note["folder"].lower() != target:
                     scores[i] = -1.0  # hard exclude
 
+        # ── Date-aware filtering ────────────────────────────────────
+        # Applied before content quality gate so temporal exclusion is the
+        # hard gate and quality is the soft ranking signal (avoids compounding
+        # penalties that silently drop short-but-in-range notes).
+        if temporal:
+            sy, sm = temporal["start_year"], temporal["start_month"]
+            ey, em = temporal["end_year"], temporal["end_month"]
+            for i, note in enumerate(metadata):
+                nd = self._note_date(note)
+                if nd is None:
+                    scores[i] *= 0.05
+                    continue
+                ny, nm = nd
+                # Compare as (year, month) tuples
+                note_ym = (ny, nm)
+                # Handle ranges that wrap around year boundary (e.g. winter: Dec-Feb)
+                if (sy, sm) <= (ey, em):
+                    in_range = (sy, sm) <= note_ym <= (ey, em)
+                else:
+                    in_range = note_ym >= (sy, sm) or note_ym <= (ey, em)
+                if not in_range:
+                    scores[i] *= 0.05
+
         # ── Content quality gate ────────────────────────────────────
         if skip_short_notes:
             for i, note in enumerate(metadata):
@@ -223,14 +271,6 @@ class NotesSearcher:
                     scores[i] *= 0.15   # heavy penalty: single-line stubs
                 elif clen < 60:
                     scores[i] *= 0.5    # moderate penalty: very short notes
-
-        # ── Date-aware filtering ────────────────────────────────────
-        year_range = self._extract_year_filter(query)
-        if year_range:
-            for i, note in enumerate(metadata):
-                year = self._note_year(note)
-                if year is None or not (year_range[0] <= year <= year_range[1]):
-                    scores[i] *= 0.05
 
         top_indices = np.argsort(scores)[::-1][:n]
 
@@ -421,27 +461,183 @@ class NotesSearcher:
 
         return None
 
-    def _extract_year_filter(self, query: str) -> tuple[int, int] | None:
-        """Detect year references in query. Returns (start, end) or None."""
-        # "between 2023 and 2025"
-        m = re.search(r'between\s+(20\d{2})\s+and\s+(20\d{2})', query, re.I)
-        if m:
-            return (int(m.group(1)), int(m.group(2)))
-        # "from 2023 to 2025"
-        m = re.search(r'from\s+(20\d{2})\s+to\s+(20\d{2})', query, re.I)
-        if m:
-            return (int(m.group(1)), int(m.group(2)))
-        # Single year: "in 2024", "2024", "during 2024"
-        m = re.search(r'\b(20\d{2})\b', query)
-        if m:
-            y = int(m.group(1))
-            return (y, y)
+    # ------------------------------------------------------------------
+    # Temporal extraction — month/year, seasons, relative dates
+    # ------------------------------------------------------------------
+
+    _MONTHS = {
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "may": 5, "june": 6, "july": 7, "august": 8,
+        "september": 9, "october": 10, "november": 11, "december": 12,
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+        "jun": 6, "jul": 7, "aug": 8, "sep": 9, "sept": 9,
+        "oct": 10, "nov": 11, "dec": 12,
+    }
+
+    _SEASONS = {
+        "spring": (3, 5), "summer": (6, 8),
+        "autumn": (9, 11), "fall": (9, 11), "winter": (12, 2),
+    }
+
+    # Pre-compiled patterns for temporal extraction, ordered most-specific first.
+    # Each returns (regex, handler_name). Handlers are methods below.
+    _TEMPORAL_PATTERNS: "list[tuple[re.Pattern, str]]" = []
+
+    @classmethod
+    def _init_temporal_patterns(cls) -> None:
+        if cls._TEMPORAL_PATTERNS:
+            return
+        month_names = "|".join(cls._MONTHS)
+        season_names = "|".join(cls._SEASONS)
+        cls._TEMPORAL_PATTERNS = [
+            # "between 2023 and 2025"
+            (re.compile(r'between\s+(20\d{2})\s+and\s+(20\d{2})', re.I), "_handle_year_range"),
+            # "from 2023 to 2025"
+            (re.compile(r'from\s+(20\d{2})\s+to\s+(20\d{2})', re.I), "_handle_year_range"),
+            # "December 2023" / "in December 2023" / "during dec 2023"
+            (re.compile(
+                rf'(?:in|during|from|of)?\s*\b({month_names})\s+(20\d{{2}})\b', re.I
+            ), "_handle_month_year"),
+            # "summer 2024" / "last spring"
+            (re.compile(
+                rf'(?:in|during|last|this)?\s*\b({season_names})\s*(20\d{{2}})?\b', re.I
+            ), "_handle_season"),
+            # "last year", "this year"
+            (re.compile(r'\b(last|this|past)\s+year\b', re.I), "_handle_relative_year"),
+            # "last month", "this month"
+            (re.compile(r'\b(last|this|past)\s+month\b', re.I), "_handle_relative_month"),
+            # "last January" / "this March" (month without year)
+            # Exclude "may" without a prefix — too ambiguous as an English verb.
+            # "May 2024" is handled by _handle_month_year above; bare "may" is skipped.
+            (re.compile(
+                rf'\b(?:last|this|past)\s+({month_names})\b(?!\s+20\d{{2}})', re.I
+            ), "_handle_bare_month"),
+            (re.compile(
+                rf'\b({month_names})\b(?!\s+20\d{{2}})', re.I
+            ), "_handle_bare_month_strict"),
+            # Bare year: "in 2024", "2024", "during 2024"
+            (re.compile(r'(?:in|during|around)?\s*\b(20\d{2})\b', re.I), "_handle_bare_year"),
+        ]
+
+    def _extract_temporal_filter(self, query: str) -> "dict | None":
+        """
+        Parse temporal references from a query. Returns:
+            {
+                "start_month": int,  "start_year": int,
+                "end_month": int,    "end_year": int,
+                "clean_query": str,  # query with temporal refs stripped
+                "match_span": (int, int),
+            }
+        or None if no temporal reference found.
+        """
+        from datetime import date
+        self._init_temporal_patterns()
+        today = date.today()
+
+        for pattern, handler_name in self._TEMPORAL_PATTERNS:
+            m = pattern.search(query)
+            if not m:
+                continue
+            handler = getattr(self, handler_name)
+            result = handler(m, today)
+            if result is None:
+                continue
+            # Build clean query: strip the matched span + leftover connectors
+            clean = (query[:m.start()] + query[m.end():]).strip()
+            # Strip filler words from both ends (up to 4 passes for chains
+            # like "what was I thinking about")
+            _FILLER = (
+                r'(what|was|were|have|had|did|do|thinking|writing|wrote|written|'
+                r'about|anything|stuff|things|notes?|i|my|in|during|from|around|'
+                r'the|of|that|back|write|wrote|written|been)'
+            )
+            for _ in range(4):
+                prev = clean
+                clean = re.sub(rf'^{_FILLER}\s+', '', clean, flags=re.I).strip()
+                clean = re.sub(rf'\s+{_FILLER}$', '', clean, flags=re.I).strip()
+                if clean == prev:
+                    break
+            # If entire remainder is a single filler word, discard it
+            if re.fullmatch(_FILLER, clean, re.I):
+                clean = ""
+            result["clean_query"] = clean
+            result["match_span"] = (m.start(), m.end())
+            return result
+
         return None
 
-    def _note_year(self, note: dict) -> int | None:
-        """Extract year from note's created date string."""
-        m = re.search(r'\b(20\d{2})\b', note.get('created', ''))
-        return int(m.group(1)) if m else None
+    def _handle_year_range(self, m: re.Match, today) -> dict:
+        y1, y2 = sorted([int(m.group(1)), int(m.group(2))])
+        return {"start_month": 1, "start_year": y1, "end_month": 12, "end_year": y2}
+
+    def _handle_month_year(self, m: re.Match, today) -> dict:
+        month = self._MONTHS[m.group(1).lower()]
+        year = int(m.group(2))
+        return {"start_month": month, "start_year": year, "end_month": month, "end_year": year}
+
+    def _handle_season(self, m: re.Match, today) -> dict | None:
+        season = m.group(1).lower()
+        start_m, end_m = self._SEASONS[season]
+        year_str = m.group(2)
+        matched = m.group(0).lower()
+
+        if year_str:
+            year = int(year_str)
+        elif "last" in matched or "past" in matched:
+            year = today.year - 1
+        else:
+            year = today.year
+
+        # Winter spans Dec–Feb: "winter 2024" = Dec 2024–Feb 2025
+        if season == "winter":
+            return {"start_month": 12, "start_year": year, "end_month": 2, "end_year": year + 1}
+        return {"start_month": start_m, "start_year": year, "end_month": end_m, "end_year": year}
+
+    def _handle_relative_year(self, m: re.Match, today) -> dict:
+        word = m.group(1).lower()
+        year = today.year if word == "this" else today.year - 1
+        return {"start_month": 1, "start_year": year, "end_month": 12, "end_year": year}
+
+    def _handle_relative_month(self, m: re.Match, today) -> dict:
+        word = m.group(1).lower()
+        if word == "this":
+            month, year = today.month, today.year
+        else:
+            month = today.month - 1
+            year = today.year
+            if month < 1:
+                month = 12
+                year -= 1
+        return {"start_month": month, "start_year": year, "end_month": month, "end_year": year}
+
+    def _handle_bare_month(self, m: re.Match, today) -> dict | None:
+        name = m.group(1).lower()
+        if name not in self._MONTHS:
+            return None
+        month = self._MONTHS[name]
+        # Assume most recent occurrence of this month
+        year = today.year if month <= today.month else today.year - 1
+        return {"start_month": month, "start_year": year, "end_month": month, "end_year": year}
+
+    def _handle_bare_month_strict(self, m: re.Match, today) -> dict | None:
+        """Bare month without prefix — skip 'may' (too ambiguous as a verb)."""
+        name = m.group(1).lower()
+        if name == "may" or name not in self._MONTHS:
+            return None
+        return self._handle_bare_month(m, today)
+
+    def _handle_bare_year(self, m: re.Match, today) -> dict:
+        year = int(m.group(1))
+        return {"start_month": 1, "start_year": year, "end_month": 12, "end_year": year}
+
+    def _note_date(self, note: dict) -> "tuple[int, int] | None":
+        """Extract (year, month) from a note's created date string."""
+        try:
+            from datetime import datetime
+            dt = datetime.strptime(note["created"], "%A, %d %B %Y at %H:%M:%S")
+            return (dt.year, dt.month)
+        except (ValueError, KeyError):
+            return None
 
     def _query_keyword_weight(self, query: str) -> float:
         """Analyze query to determine keyword vs semantic balance.
@@ -553,6 +749,104 @@ class NotesSearcher:
             del self._cache[oldest]
 
         return vec
+
+    # ------------------------------------------------------------------
+    # Daily digest — "On This Day"
+    # ------------------------------------------------------------------
+
+    _DIGEST_SYSTEM = (
+        "You are a warm, concise companion summarising a writer's old note. "
+        "Given the note title, folder, and content excerpt, write a single evocative sentence "
+        "that captures what the note is about — the kind of line that makes a writer say "
+        "\"oh, I forgot I wrote that.\" "
+        "Start with: \"On this day in {year}, you wrote about\" and finish the thought naturally. "
+        "Keep it under 30 words. No quotes, no brackets, no metadata."
+    )
+
+    def daily_digest(self) -> dict | None:
+        """
+        Return an 'On This Day' note for today, or None if nothing qualifies.
+        Result: { year, title, folder, teaser, content, snippet }
+        Cached for the calendar day.
+        """
+        from datetime import date, datetime
+
+        if not self.is_loaded:
+            return None
+
+        today = date.today()
+        cache_key = f"_digest_{today.isoformat()}"
+
+        # Check day-level cache (stored on self to survive across calls)
+        if hasattr(self, cache_key):
+            return getattr(self, cache_key)
+
+        # Find notes created on today's month+day in previous years
+        candidates = []
+        for m in self._metadata:
+            try:
+                dt = datetime.strptime(m["created"], "%A, %d %B %Y at %H:%M:%S")
+            except (ValueError, KeyError):
+                continue
+
+            if dt.month == today.month and dt.day == today.day and dt.year < today.year:
+                content_len = len(m.get("content", ""))
+                # Skip junk: too short, empty, or trivially short
+                if content_len < 60:
+                    continue
+                candidates.append((dt.year, m, content_len))
+
+        if not candidates:
+            setattr(self, cache_key, None)
+            return None
+
+        # Score by "interestingness": prefer longer, more substantive notes
+        # Bonus for certain folders that tend to hold personal writing
+        _WRITER_FOLDERS = {"Ideas", "Writing Ideas", "Poems", "Stories", "My Blog",
+                           "Godly Writing", "Shared Sketch", "Goals"}
+
+        def _score(item):
+            year, m, clen = item
+            age_bonus = (today.year - year) * 10  # older = more nostalgic
+            length_score = min(clen, 3000)  # diminishing returns past 3k
+            folder_bonus = 200 if m.get("folder") in _WRITER_FOLDERS else 0
+            return age_bonus + length_score + folder_bonus
+
+        candidates.sort(key=_score, reverse=True)
+        year, note, _ = candidates[0]
+
+        # Generate the teaser via GPT-4o-mini
+        excerpt = note.get("content", "")[:800]
+        try:
+            chat = self._client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": self._DIGEST_SYSTEM.replace("{year}", str(year))},
+                    {"role": "user", "content": f"Title: {note['title']}\nFolder: {note['folder']}\n\n{excerpt}"},
+                ],
+                max_tokens=80,
+                temperature=0.7,
+            )
+            teaser = chat.choices[0].message.content.strip()
+        except Exception:
+            # Fallback: simple template
+            teaser = f"On this day in {year}, you wrote \u201c{note['title']}\u201d."
+
+        result = {
+            "year": year,
+            "title": note["title"],
+            "folder": note["folder"],
+            "teaser": teaser,
+            "content": note.get("content", "")[:500],
+            "snippet": self._make_snippet(note.get("content", "")),
+        }
+
+        setattr(self, cache_key, result)
+        return result
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     def _make_snippet(self, content: str, n_chars: int = 160) -> str:
         """First ≤n_chars of content, truncated to a word boundary."""

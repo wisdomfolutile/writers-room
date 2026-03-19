@@ -1,14 +1,16 @@
 """
-Indexes Apple Notes into a local vector store.
+Indexes notes from all configured sources into a local vector store.
 
-Reads notes via AppleScript (batch per folder), embeds with OpenAI,
-and saves as numpy arrays on disk for fast semantic search.
+Reads notes via source adapters (Apple Notes, Obsidian, Bear, etc.),
+embeds with OpenAI, and saves as numpy arrays on disk for fast semantic search.
 
 Usage:
-    python3 indexer.py                          # incremental update (all folders)
+    python3 indexer.py                          # incremental update (all sources)
     python3 indexer.py --force                  # re-embed everything
-    python3 indexer.py --folders "Ideas,Poems"  # only index specific folders
-    python3 indexer.py --list-folders           # show all folders + note counts
+    python3 indexer.py --folders "Ideas,Poems"  # only index specific groups
+    python3 indexer.py --sources "bear"         # only index specific sources
+    python3 indexer.py --list-folders           # show all groups + note counts
+    python3 indexer.py --list-sources           # show configured sources
 """
 
 import json
@@ -20,7 +22,7 @@ import numpy as np
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from notes_reader import read_notes, get_folder_names
+from source_config import get_active_adapters, list_sources
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -62,76 +64,101 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     return all_embeddings
 
 
-MAX_CHARS = 24_000  # ~6k tokens, safely under the 8192 token limit
+MAX_CHARS = 24_000  # ~6k tokens, safely under the 8,192 token limit
 
 
 def build_text_for_embedding(note: dict) -> str:
-    """Combine title + folder + content for richer embedding. Truncates if too long."""
-    text = f"Title: {note['title']}\nFolder: {note['folder']}\n\n{note['content']}"
+    """Combine title + source + folder + content for richer embedding."""
+    source = note.get("source", "apple_notes")
+    text = f"Title: {note['title']}\nSource: {source}\nFolder: {note['folder']}\n\n{note['content']}"
     return text[:MAX_CHARS] if len(text) > MAX_CHARS else text
 
 
 def run_index(
     force: bool = False,
     folders: list[str] | None = None,
+    sources: list[str] | None = None,
     on_progress=None,
 ) -> tuple[int, int]:
     """
-    Build or update the search index, saving after each folder.
+    Build or update the search index, saving after each group.
     Resumable: if interrupted, re-running will skip already-indexed notes.
 
     Args:
         force: Re-embed even unchanged notes.
-        folders: If set, only process these folders. Others are kept as-is.
+        folders: If set, only process these groups. Others are kept as-is.
+        sources: If set, only process these source IDs. Others are kept as-is.
         on_progress: Optional callback(folder_index, total_folders, folder_name, notes_so_far, embedded_so_far)
-                     called after each folder is processed.
 
     Returns:
         (total_indexed, num_updated)
     """
     start = time.time()
 
-    # Load existing index (used for incremental updates)
+    # Load existing index
     existing_embeddings, existing_metadata = load_index()
     existing_by_id: dict[str, tuple[int, dict]] = {
         m["id"]: (i, m) for i, m in enumerate(existing_metadata)
     }
 
-    target_folders = folders if folders is not None else get_folder_names()
+    # Get active adapters
+    adapters = get_active_adapters()
+    if sources:
+        source_set = set(sources)
+        adapters = [a for a in adapters if a.source_id in source_set]
 
-    if folders:
-        print(f"\nReading notes from folders: {', '.join(folders)}")
-    else:
-        print("\nReading notes from Apple Notes (all folders)...")
+    # Build the list of (adapter, group) pairs to process
+    work: list[tuple] = []
+    for adapter in adapters:
+        groups = adapter.get_groups()
+        if folders:
+            groups = [g for g in groups if g in folders]
+        for group in groups:
+            work.append((adapter, group))
+
+    total_work = len(work)
+    if not total_work:
+        print("Nothing to index.")
+        return len(existing_metadata), 0
+
+    adapter_names = {a.source_id: a.display_name for a in adapters}
+    print(f"\nIndexing {total_work} groups from: {', '.join(adapter_names.values())}")
 
     total_updated = 0
     notes_so_far = 0
 
-    for folder_idx, folder_name in enumerate(target_folders, 1):
-        print(f"  [{folder_idx}/{len(target_folders)}] {folder_name}...", end=" ", flush=True)
+    for work_idx, (adapter, group_name) in enumerate(work, 1):
+        source = adapter.source_id
+        label = f"{adapter.display_name} / {group_name}"
+        print(f"  [{work_idx}/{total_work}] {label}...", end=" ", flush=True)
 
-        folder_notes = read_notes(folders=[folder_name])
+        group_notes = adapter.read_group(group_name)
 
-        if not folder_notes:
+        if not group_notes:
             print("skipped")
             if on_progress:
-                on_progress(folder_idx, len(target_folders), folder_name, notes_so_far, total_updated)
+                on_progress(work_idx, total_work, group_name, notes_so_far, total_updated)
             continue
 
         # Split into unchanged (reuse embedding) vs needs embedding
         to_reuse: list[tuple[dict, np.ndarray]] = []
         to_embed: list[dict] = []
 
-        for note in folder_notes:
+        for note in group_notes:
+            # Backward compat: inject source if missing
+            if "source" not in note:
+                note["source"] = source
+
             note_id = note["id"]
             if not force and note_id in existing_by_id:
                 idx, existing = existing_by_id[note_id]
                 if existing.get("modified") == note["modified"]:
-                    to_reuse.append((existing, existing_embeddings[idx]))
+                    # Reuse existing embedding, but update metadata (may have new fields)
+                    to_reuse.append((note, existing_embeddings[idx]))
                     continue
             to_embed.append(note)
 
-        print(f"{len(folder_notes)} notes ({len(to_embed)} to embed)")
+        print(f"{len(group_notes)} notes ({len(to_embed)} to embed)")
 
         new_embeddings: list[np.ndarray] = []
         if to_embed:
@@ -139,23 +166,25 @@ def run_index(
             new_embeddings = [np.array(e, dtype=np.float32) for e in embed_texts(texts)]
             total_updated += len(to_embed)
 
-        notes_so_far += len(folder_notes)
+        notes_so_far += len(group_notes)
 
-        # Merge this folder's results into the existing index
-        # Remove any old entries for this folder, then add fresh ones
+        # Merge: remove old entries for this (source, group), add fresh ones
         existing_embeddings, existing_metadata = load_index()
-        kept_meta = [m for m in existing_metadata if m["folder"] != folder_name]
+        kept_meta = [
+            m for m in existing_metadata
+            if not (m.get("source", "apple_notes") == source and m["folder"] == group_name)
+        ]
         kept_emb = [
             existing_embeddings[i]
             for i, m in enumerate(existing_metadata)
-            if m["folder"] != folder_name
+            if not (m.get("source", "apple_notes") == source and m["folder"] == group_name)
         ]
 
-        folder_meta = [r[0] for r in to_reuse] + to_embed
-        folder_emb = [r[1] for r in to_reuse] + new_embeddings
+        group_meta = [r[0] for r in to_reuse] + to_embed
+        group_emb = [r[1] for r in to_reuse] + new_embeddings
 
-        all_meta = kept_meta + folder_meta
-        all_emb = kept_emb + folder_emb
+        all_meta = kept_meta + group_meta
+        all_emb = kept_emb + group_emb
 
         save_index(np.array(all_emb, dtype=np.float32), all_meta)
 
@@ -164,7 +193,7 @@ def run_index(
         existing_by_id = {m["id"]: (i, m) for i, m in enumerate(existing_metadata)}
 
         if on_progress:
-            on_progress(folder_idx, len(target_folders), folder_name, notes_so_far, total_updated)
+            on_progress(work_idx, total_work, group_name, notes_so_far, total_updated)
 
     elapsed = time.time() - start
     _, final_metadata = load_index()
@@ -173,24 +202,34 @@ def run_index(
 
 
 def list_folders() -> None:
-    """Print all folders with their note counts from the current index."""
+    """Print all groups with their note counts, grouped by source."""
     _, metadata = load_index()
-    indexed: dict[str, int] = {}
-    for m in metadata:
-        indexed[m["folder"]] = indexed.get(m["folder"], 0) + 1
 
-    all_folders = get_folder_names()
-    print(f"\n{'Folder':<35} {'Indexed':>8}")
-    print("-" * 45)
-    for folder in sorted(all_folders):
-        count = indexed.get(folder, 0)
-        marker = "  ✓" if count > 0 else ""
-        print(f"{folder:<35} {count:>8}{marker}")
-    print(f"\nTotal indexed: {len(metadata)}")
+    # Group by source, then folder
+    by_source: dict[str, dict[str, int]] = {}
+    for m in metadata:
+        source = m.get("source", "apple_notes")
+        folder = m["folder"]
+        by_source.setdefault(source, {})
+        by_source[source][folder] = by_source[source].get(folder, 0) + 1
+
+    for source, folders in sorted(by_source.items()):
+        print(f"\n  {source}")
+        print(f"  {'─' * 40}")
+        for folder in sorted(folders):
+            count = folders[folder]
+            print(f"    {folder:<33} {count:>5}")
+        print(f"    {'Total':<33} {sum(folders.values()):>5}")
+
+    print(f"\n  Grand total: {len(metadata)} notes")
 
 
 if __name__ == "__main__":
     args = sys.argv[1:]
+
+    if "--list-sources" in args:
+        list_sources()
+        sys.exit(0)
 
     if "--list-folders" in args:
         list_folders()
@@ -202,10 +241,16 @@ if __name__ == "__main__":
     if "--folders" in args:
         idx = args.index("--folders")
         folders = [f.strip() for f in args[idx + 1].split(",")]
-        print(f"Targeting folders: {folders}")
+        print(f"Targeting groups: {folders}")
+
+    source_filter = None
+    if "--sources" in args:
+        idx = args.index("--sources")
+        source_filter = [s.strip() for s in args[idx + 1].split(",")]
+        print(f"Targeting sources: {source_filter}")
 
     if force:
         print("Force mode: re-embedding all notes in scope.")
 
-    total, updated = run_index(force=force, folders=folders)
+    total, updated = run_index(force=force, folders=folders, sources=source_filter)
     print(f"\nDone. {total} notes indexed, {updated} updated.")

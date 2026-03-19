@@ -1,0 +1,50 @@
+---
+const faqs = [
+  {
+    q: "Will it read my iCloud notes too?",
+    a: "Yes — everything that shows up in your Apple Notes app is searchable, including iCloud-synced notes. If you can see it in Notes, Writers Room can find it.",
+  },
+  {
+    q: "Do my notes ever leave my Mac?",
+    a: "Your words stay on your machine. The only thing sent externally is a mathematical fingerprint of each note (numbers, not text) for the initial embedding. It can't be reversed back into your writing.",
+  },
+  {
+    q: "I have thousands of notes. How long does setup take?",
+    a: "About five minutes for 5,800 notes. After that, only new or changed notes are processed — so daily updates take seconds. You can interrupt anytime; progress is saved after each folder.",
+  },
+  {
+    q: "What about my locked notes?",
+    a: "Password-protected notes are automatically skipped. They're never read, never indexed, never searchable. By design.",
+  },
+  {
+    q: "Do I need an API key to use it?",
+    a: "The free tier (coming in v3) bundles a local AI model — no API key, no account, no cost. The Pro tier lets you bring your own key from OpenAI, Claude, Gemini, or others for deeper search and synthesis.",
+  },
+];
+---
+
+<section id="faq" class="section bg-apple-bg">
+  <div class="max-w-2xl mx-auto px-6">
+    <div class="text-center mb-16">
+      <h2 class="fade-up text-3xl md:text-4xl lg:text-5xl font-bold text-apple-text tracking-tight">
+        You're probably wondering.
+      </h2>
+    </div>
+
+    <div class="fade-up space-y-3">
+      {faqs.map((faq) => (
+        <details class="group rounded-xl border border-apple-border/30 bg-apple-card-solid/70 backdrop-blur-sm overflow-hidden">
+          <summary class="flex items-center justify-between cursor-pointer px-6 py-4 text-[15px] font-medium text-apple-text hover:bg-apple-bg-alt/30 transition-colors list-none [&::-webkit-details-marker]:hidden">
+            {faq.q}
+            <svg class="w-5 h-5 text-apple-text-secondary shrink-0 ml-4 transition-transform duration-200 group-open:rotate-45" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path d="M12 5v14M5 12h14"/>
+            </svg>
+          </summary>
+          <div class="px-6 pb-5 text-[15px] text-apple-text-secondary leading-relaxed">
+            {faq.a}
+          </div>
+        </details>
+      ))}
+    </div>
+  </div>
+</section>

@@ -1,0 +1,112 @@
+---
+const line1 = ["Every", "idea", "you've", "ever", "had."];
+const line2prefix = ["Found", "in"];
+---
+
+<section class="relative pt-32 pb-16 md:pt-44 md:pb-24 overflow-hidden bg-apple-bg">
+
+  <div class="relative max-w-5xl mx-auto px-6 text-center">
+    <!-- Headline with word spans for stagger animation -->
+    <h1
+      data-hero-headline
+      class="text-[2.75rem] md:text-[3.75rem] lg:text-[4.5rem] font-bold tracking-tight leading-[1.08] text-apple-text mb-6"
+    >
+      {line1.map((word) => (
+        <span class="word inline-block opacity-0 mr-[0.3em]">{word}</span>
+      ))}
+      <br />
+      {line2prefix.map((word) => (
+        <span class="word inline-block opacity-0 mr-[0.3em]">{word}</span>
+      ))}
+      <span class="word inline-block opacity-0 mr-[0.3em]"><em class="text-gold-text italic">seconds.</em></span>
+    </h1>
+
+    <!-- Subheadline -->
+    <p
+      data-hero-sub
+      class="opacity-0 text-lg md:text-xl text-apple-text-secondary max-w-2xl mx-auto mb-10 leading-relaxed"
+    >
+      You've written thousands of notes. Poems, essays, half-finished ideas, late-night thoughts.
+      Writers Room finds them by <em>what they mean</em> — not what you
+      remember calling them.
+    </p>
+
+    <!-- CTA buttons -->
+    <div data-hero-cta class="opacity-0 flex flex-col sm:flex-row items-center justify-center gap-4 mb-16">
+      <a
+        href="#setup"
+        class="inline-flex items-center px-8 py-3.5 bg-gold text-apple-code-bg text-[17px] font-semibold rounded-full hover:bg-gold-hover transition-colors shadow-lg shadow-gold/20"
+      >
+        Start Searching
+      </a>
+      <a
+        href="#how-it-works"
+        class="inline-flex items-center px-8 py-3.5 text-gold-text text-[17px] font-medium rounded-full border border-gold/40 hover:bg-gold/5 transition-colors"
+      >
+        See It In Action
+      </a>
+    </div>
+
+    <!-- Mock search bar -->
+    <div data-hero-search class="opacity-0 max-w-2xl mx-auto">
+      <div class="glass rounded-2xl p-1.5 shadow-lg shadow-black/5">
+        <div class="flex items-center gap-3 bg-apple-card-solid/60 rounded-xl px-5 py-4">
+          <svg class="w-5 h-5 text-apple-text-secondary shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <circle cx="11" cy="11" r="8"/>
+            <path d="m21 21-4.3-4.3"/>
+          </svg>
+          <span class="text-apple-text-secondary text-[17px]" id="hero-typewriter">
+            what have I written about leaving home?
+          </span>
+        </div>
+      </div>
+      <p class="text-[13px] text-apple-text-secondary/60 mt-3">
+        Ask a question. Get the note. Open it in Apple Notes.
+      </p>
+    </div>
+  </div>
+</section>
+
+<script>
+  const queries = [
+    "what have I written about leaving home?",
+    "poems about my mother's kitchen",
+    "that startup idea from last summer",
+    "reflections on faith and doubt",
+    "the essay about Lagos traffic",
+    "notes where I mentioned Soyinka",
+    "drafts about identity and belonging",
+    "what was I thinking in December 2023?",
+  ];
+
+  const el = document.getElementById("hero-typewriter");
+  if (el) {
+    let currentIndex = 0;
+
+    async function typeQuery(text: string) {
+      if (!el) return;
+      // Erase
+      const currentText = el.textContent || "";
+      for (let i = currentText.length; i >= 0; i--) {
+        el.textContent = currentText.slice(0, i);
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      // Type
+      for (let i = 0; i <= text.length; i++) {
+        el.textContent = text.slice(0, i);
+        await new Promise((r) => setTimeout(r, 45));
+      }
+    }
+
+    async function cycle() {
+      await new Promise((r) => setTimeout(r, 3000)); // initial pause
+      while (true) {
+        currentIndex = (currentIndex + 1) % queries.length;
+        await typeQuery(queries[currentIndex]);
+        await new Promise((r) => setTimeout(r, 2500));
+      }
+    }
+
+    cycle();
+  }
+</script>

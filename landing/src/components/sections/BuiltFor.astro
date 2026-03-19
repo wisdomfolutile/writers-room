@@ -1,0 +1,150 @@
+---
+/**
+ * "Built For" platform ticker — cycles through supported note apps.
+ * Uses real SVG logos from simple-icons for Apple, Obsidian, Markdown.
+ * Uses official app icons (raster) for Bear, Ulysses, iA Writer.
+ */
+
+const platforms = [
+  {
+    name: "Apple Notes",
+    // Apple logo from simple-icons (simpleicons.org/icons/apple.svg)
+    icon: `<svg role="img" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" class="w-8 h-8 md:w-10 md:h-10 fill-current"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg>`,
+    color: "text-apple-text",
+  },
+  {
+    name: "Obsidian",
+    // Obsidian logo from simple-icons (simpleicons.org/icons/obsidian.svg)
+    icon: `<svg role="img" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" class="w-8 h-8 md:w-10 md:h-10" style="fill: #7C3AED;"><path d="M19.355 18.538a68.967 68.959 0 0 0 1.858-2.954.81.81 0 0 0-.062-.9c-.516-.685-1.504-2.075-2.042-3.362-.553-1.321-.636-3.375-.64-4.377a1.707 1.707 0 0 0-.358-1.05l-3.198-4.064a3.744 3.744 0 0 1-.076.543c-.106.503-.307 1.004-.536 1.5-.134.29-.29.6-.446.914l-.31.626c-.516 1.068-.997 2.227-1.132 3.59-.124 1.26.046 2.73.815 4.481.128.011.257.025.386.044a6.363 6.363 0 0 1 3.326 1.505c.916.79 1.744 1.922 2.415 3.5zM8.199 22.569c.073.012.146.02.22.02.78.024 2.095.092 3.16.29.87.16 2.593.64 4.01 1.055 1.083.316 2.198-.548 2.355-1.664.114-.814.33-1.735.725-2.58l-.01.005c-.67-1.87-1.522-3.078-2.416-3.849a5.295 5.295 0 0 0-2.778-1.257c-1.54-.216-2.952.19-3.84.45.532 2.218.368 4.829-1.425 7.531zM5.533 9.938c-.023.1-.056.197-.098.29L2.82 16.059a1.602 1.602 0 0 0 .313 1.772l4.116 4.24c2.103-3.101 1.796-6.02.836-8.3-.728-1.73-1.832-3.081-2.55-3.831zM9.32 14.01c.615-.183 1.606-.465 2.745-.534-.683-1.725-.848-3.233-.716-4.577.154-1.552.7-2.847 1.235-3.95.113-.235.223-.454.328-.664.149-.297.288-.577.419-.86.217-.47.379-.885.46-1.27.08-.38.08-.72-.014-1.043-.095-.325-.297-.675-.68-1.06a1.6 1.6 0 0 0-1.475.36l-4.95 4.452a1.602 1.602 0 0 0-.513.952l-.427 2.83c.672.59 2.328 2.316 3.335 4.711.09.21.175.43.253.653z"/></svg>`,
+    color: "text-apple-text",
+  },
+  {
+    name: "Bear",
+    icon: `<img src="/logos/bear.png" alt="Bear" class="w-10 h-10 md:w-12 md:h-12 rounded-xl object-contain" />`,
+    color: "text-apple-text",
+  },
+  {
+    name: "Ulysses",
+    icon: `<img src="/logos/ulysses.jpg" alt="Ulysses" class="w-10 h-10 md:w-12 md:h-12 rounded-xl object-contain" />`,
+    color: "text-apple-text",
+  },
+  {
+    name: "iA Writer",
+    icon: `<img src="/logos/iawriter.png" alt="iA Writer" class="w-10 h-10 md:w-12 md:h-12 rounded-xl object-contain" />`,
+    color: "text-apple-text",
+  },
+  {
+    name: "Markdown",
+    // Markdown logo from simple-icons (simpleicons.org/icons/markdown.svg)
+    icon: `<svg role="img" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" class="w-8 h-8 md:w-10 md:h-10 fill-current"><path d="M22.27 19.385H1.73A1.73 1.73 0 010 17.655V6.345a1.73 1.73 0 011.73-1.73h20.54A1.73 1.73 0 0124 6.345v11.308a1.73 1.73 0 01-1.73 1.731zM5.769 15.923v-4.5l2.308 2.885 2.307-2.885v4.5h2.308V8.078h-2.308l-2.307 2.885-2.308-2.885H3.46v7.847zM21.232 12h-2.309V8.077h-2.307V12h-2.308l3.461 4.039z"/></svg>`,
+    color: "text-apple-text",
+  },
+];
+---
+
+<section class="py-16 md:py-20 border-y border-apple-border/20">
+  <div class="max-w-3xl mx-auto px-6 text-center">
+    <p class="fade-up text-sm font-medium uppercase tracking-[0.2em] text-apple-text-secondary/60 mb-6">
+      Built for
+    </p>
+
+    <!-- Cycling platform display -->
+    <div class="fade-up relative h-16 md:h-20 flex items-center justify-center overflow-hidden" data-platform-ticker>
+      {platforms.map((platform, i) => (
+        <div
+          class={`platform-name absolute inset-0 flex items-center justify-center gap-4 opacity-0 ${platform.color}`}
+          data-platform-index={i}
+        >
+          <Fragment set:html={platform.icon} />
+          <span class="text-3xl md:text-4xl lg:text-5xl font-bold tracking-tight">
+            {platform.name}
+          </span>
+        </div>
+      ))}
+    </div>
+
+    <!-- Dot indicators -->
+    <div class="fade-up flex items-center justify-center gap-2 mt-6" data-platform-dots>
+      {platforms.map((_, i) => (
+        <button
+          class="w-1.5 h-1.5 rounded-full bg-apple-text-secondary/20 transition-all duration-300"
+          data-dot-index={i}
+          aria-label={`Show ${platforms[i].name}`}
+        />
+      ))}
+    </div>
+
+    <p class="fade-up text-base text-apple-text-secondary mt-8 max-w-md mx-auto">
+      One search across all the places you write. Your notes stay in their apps — Writers Room just reads them.
+    </p>
+  </div>
+</section>
+
+<style>
+  /* Active dot */
+  [data-dot-index].active {
+    background-color: var(--color-gold) !important;
+    transform: scale(1.4);
+  }
+</style>
+
+<script>
+  function initPlatformTicker() {
+    const ticker = document.querySelector("[data-platform-ticker]");
+    const dotsContainer = document.querySelector("[data-platform-dots]");
+    if (!ticker || !dotsContainer) return;
+
+    const platforms = ticker.querySelectorAll(".platform-name");
+    const dots = dotsContainer.querySelectorAll("[data-dot-index]");
+    let current = 0;
+    let interval: ReturnType<typeof setInterval>;
+
+    function show(index: number) {
+      platforms.forEach((p, i) => {
+        const el = p as HTMLElement;
+        if (i === index) {
+          el.style.opacity = "1";
+          el.style.transform = "translateY(0)";
+          el.style.transition = "opacity 0.5s ease, transform 0.5s ease";
+        } else {
+          el.style.opacity = "0";
+          el.style.transform = "translateY(12px)";
+          el.style.transition = "opacity 0.3s ease, transform 0.3s ease";
+        }
+      });
+
+      dots.forEach((d, i) => {
+        if (i === index) {
+          d.classList.add("active");
+        } else {
+          d.classList.remove("active");
+        }
+      });
+
+      current = index;
+    }
+
+    function next() {
+      show((current + 1) % platforms.length);
+    }
+
+    // Click dots to jump
+    dots.forEach((dot, i) => {
+      dot.addEventListener("click", () => {
+        show(i);
+        clearInterval(interval);
+        interval = setInterval(next, 2500);
+      });
+    });
+
+    // Start
+    show(0);
+    interval = setInterval(next, 2500);
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initPlatformTicker);
+  } else {
+    initPlatformTicker();
+  }
+</script>

@@ -1,0 +1,20 @@
+---
+import SearchBar from "../ui/SearchBar";
+---
+
+<section class="section bg-apple-bg">
+  <div class="max-w-4xl mx-auto px-6">
+    <div class="text-center mb-12">
+      <h2 class="fade-up text-3xl md:text-4xl lg:text-5xl font-bold text-apple-text tracking-tight">
+        Type what you're looking for. In your own words.
+      </h2>
+      <p class="fade-up text-lg text-apple-text-secondary mt-4 max-w-xl mx-auto">
+        No exact titles needed. No folder names. Just describe what you remember.
+      </p>
+    </div>
+
+    <div class="fade-up">
+      <SearchBar client:load />
+    </div>
+  </div>
+</section>

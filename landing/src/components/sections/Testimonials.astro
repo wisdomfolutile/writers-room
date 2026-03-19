@@ -1,0 +1,57 @@
+---
+const testimonials = [
+  {
+    quote: "I searched 'what have I been avoiding writing about' and it actually found the right notes. That's when I knew this was different.",
+    name: "Your Name Here",
+    role: "Beta Tester",
+    initials: "YN",
+  },
+  {
+    quote: "The synthesis feature feels like having a conversation with your past self. The [[note links]] that open directly in Apple Notes are genius.",
+    name: "Your Name Here",
+    role: "Beta Tester",
+    initials: "YN",
+  },
+  {
+    quote: "I pasted a literary magazine's submission call URL and it instantly found three drafts in my notes that were perfect fits. Submitted two.",
+    name: "Your Name Here",
+    role: "Beta Tester",
+    initials: "YN",
+  },
+];
+---
+
+<section class="section bg-apple-bg">
+  <div class="max-w-5xl mx-auto px-6">
+    <div class="text-center mb-16">
+      <h2 class="fade-up text-3xl md:text-4xl lg:text-5xl font-bold text-apple-text tracking-tight">
+        "I forgot I wrote this."
+      </h2>
+      <p class="fade-up text-lg text-apple-text-secondary mt-4 max-w-xl mx-auto">
+        The most common reaction from early testers. Followed closely by a long silence.
+      </p>
+    </div>
+
+    <div class="grid md:grid-cols-3 gap-6">
+      {testimonials.map((t) => (
+        <div class="fade-up rounded-2xl border border-apple-border/30 bg-apple-card-solid/70 backdrop-blur-sm p-7">
+          <svg class="w-8 h-8 text-gold/30 mb-4" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M14.017 21v-7.391c0-5.704 3.731-9.57 8.983-10.609l.995 2.151c-2.432.917-3.995 3.638-3.995 5.849h4v10h-9.983zm-14.017 0v-7.391c0-5.704 3.748-9.57 9-10.609l.996 2.151c-2.433.917-3.996 3.638-3.996 5.849h3.983v10h-9.983z"/>
+          </svg>
+          <p class="text-[15px] text-apple-text leading-relaxed mb-6 italic">
+            "{t.quote}"
+          </p>
+          <div class="flex items-center gap-3">
+            <div class="w-9 h-9 rounded-full bg-apple-bg-alt border border-apple-border/50 flex items-center justify-center text-xs font-semibold text-apple-text-secondary">
+              {t.initials}
+            </div>
+            <div>
+              <div class="text-sm font-medium text-apple-text">{t.name}</div>
+              <div class="text-xs text-apple-text-secondary">{t.role}</div>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  </div>
+</section>

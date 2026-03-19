@@ -1,0 +1,39 @@
+---
+const stats = [
+  { value: 5844, suffix: "", label: "notes, instantly searchable" },
+  { value: 88, suffix: "", label: "folders, nothing left behind" },
+  { value: 50, prefix: "<$0.", suffix: "/mo", label: "to run. Not a typo." },
+];
+---
+
+<section class="py-12 md:py-16 border-y border-apple-border/40 bg-apple-bg-alt/50">
+  <div class="max-w-4xl mx-auto px-6">
+    <div class="grid grid-cols-3 gap-8 text-center">
+      {stats.map((stat) => (
+        <div>
+          <div class="text-3xl md:text-4xl lg:text-5xl font-bold text-apple-text tracking-tight">
+            {stat.prefix ? (
+              <span
+                data-count-to={stat.value}
+                data-count-prefix={stat.prefix}
+                data-count-suffix={stat.suffix}
+              >
+                {stat.prefix}0{stat.suffix}
+              </span>
+            ) : (
+              <span
+                data-count-to={stat.value}
+                data-count-suffix={stat.suffix}
+              >
+                0
+              </span>
+            )}
+          </div>
+          <div class="text-sm md:text-base text-apple-text-secondary mt-1">
+            {stat.label}
+          </div>
+        </div>
+      ))}
+    </div>
+  </div>
+</section>

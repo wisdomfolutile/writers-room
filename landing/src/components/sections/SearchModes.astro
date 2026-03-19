@@ -1,0 +1,67 @@
+---
+const modes = [
+  {
+    key: "semantic",
+    label: "Semantic",
+    tagline: "Find by feeling",
+    description: "You don't remember the title. You barely remember the words. But you remember what it was about. That's enough.",
+    example: '"what have I written about grief?"',
+    bestFor: "When you know the theme but not the title",
+    color: "bg-purple-500/10 text-purple-600 border-purple-200",
+  },
+  {
+    key: "keyword",
+    label: "Keyword",
+    tagline: "Find by phrase",
+    description: "You remember exactly what you wrote — or a name, a date, a recipe title. Type it and it's there. Instant, offline, precise.",
+    example: '"Ugochukwu\'s phone number"',
+    bestFor: "When you know the exact words",
+    color: "bg-orange-500/10 text-orange-600 border-orange-200",
+  },
+  {
+    key: "hybrid",
+    label: "Hybrid",
+    tagline: "Let it decide",
+    description: "Don't think about which mode to use. Hybrid reads your query and automatically leans toward meaning or exact match — whichever fits better.",
+    example: '"Lagos poems from 2024"',
+    bestFor: "Just type. The right results come.",
+    color: "bg-teal/10 text-teal border-teal/30",
+  },
+];
+---
+
+<section class="section bg-apple-bg">
+  <div class="max-w-5xl mx-auto px-6">
+    <div class="text-center mb-16">
+      <h2 class="fade-up text-3xl md:text-4xl lg:text-5xl font-bold text-apple-text tracking-tight">
+        However you remember it. We'll find it.
+      </h2>
+      <p class="fade-up text-lg text-apple-text-secondary mt-4 max-w-xl mx-auto">
+        Three search modes. One keystroke to switch. Or just type — smart hybrid handles the rest.
+      </p>
+    </div>
+
+    <div class="grid md:grid-cols-3 gap-6">
+      {modes.map((mode) => (
+        <div data-mode-card class="rounded-2xl border border-apple-border/30 bg-apple-card-solid/70 backdrop-blur-sm p-7 opacity-0">
+          <div class={`inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold border mb-4 ${mode.color}`}>
+            {mode.label}
+          </div>
+          <h3 class="text-xl font-semibold text-apple-text mb-1">{mode.tagline}</h3>
+          <p class="text-[15px] text-apple-text-secondary leading-relaxed mb-5">{mode.description}</p>
+
+          <div class="space-y-3">
+            <div>
+              <span class="text-xs font-medium text-apple-text-secondary uppercase tracking-wider">Example</span>
+              <p class="text-sm text-apple-text font-mono mt-1">{mode.example}</p>
+            </div>
+            <div>
+              <span class="text-xs font-medium text-apple-text-secondary uppercase tracking-wider">Best for</span>
+              <p class="text-sm text-apple-text-secondary mt-1">{mode.bestFor}</p>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  </div>
+</section>

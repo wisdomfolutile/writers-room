@@ -13,10 +13,10 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import requests
-from bs4 import BeautifulSoup
+import trafilatura
 from dotenv import load_dotenv
 from openai import OpenAI
+from urllib.parse import urlparse
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -284,11 +284,13 @@ class NotesSearcher:
                 continue
             note = metadata[idx]
             result = {
-                "title":   note["title"],
-                "folder":  note["folder"],
-                "content": note["content"],
-                "snippet": self._make_snippet(note["content"]),
-                "score":   score,
+                "title":    note["title"],
+                "folder":   note["folder"],
+                "source":   note.get("source", "apple_notes"),
+                "open_url": note.get("open_url", ""),
+                "content":  note["content"],
+                "snippet":  self._make_snippet(note["content"]),
+                "score":    score,
             }
             if brief_summary:
                 result["brief_summary"] = brief_summary
@@ -342,10 +344,10 @@ class NotesSearcher:
                      on_status: "Callable[[str], None] | None" = None) -> dict | None:
         """
         Fetch a URL, distill its themes via GPT-4o-mini, return
-        {"search_query": "...", "brief_summary": "..."} or None on failure.
+        {"search_query": "...", "brief_summary": "...", "page_read": bool}.
+        Falls back to URL-derived keywords when page can't be fetched.
         Results are cached by URL.
         """
-        # Check cache first
         if url in self._url_cache:
             return self._url_cache[url]
 
@@ -353,65 +355,115 @@ class NotesSearcher:
             on_status("reading link…")
 
         page_text = self._fetch_page_text(url)
-        if not page_text:
-            return None  # fetch failed — fall back to raw query
 
-        if on_status:
-            on_status("analyzing brief…")
+        if page_text:
+            # Successfully read the page — distill themes via GPT
+            if on_status:
+                on_status("analyzing page…")
 
-        # Truncate page text to ~3000 chars to keep tokens low
-        page_text = page_text[:3000]
+            # Truncate to ~4000 chars for better coverage (trafilatura
+            # already stripped boilerplate, so this is real content)
+            page_text = page_text[:4000]
 
-        user_msg = ""
+            user_msg = ""
+            if user_context:
+                user_msg = f'The writer said: "{user_context}"\n\n'
+            user_msg += f"Here is the content from the linked page:\n---\n{page_text}\n---"
+
+            try:
+                resp = self._client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": _URL_DISTILL_SYSTEM},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    max_tokens=150,
+                    temperature=0.3,
+                )
+                raw = resp.choices[0].message.content.strip()
+                if raw.startswith("```"):
+                    raw = re.sub(r'^```\w*\n?', '', raw)
+                    raw = re.sub(r'\n?```$', '', raw)
+                result = json.loads(raw)
+
+                if "search_query" in result and "brief_summary" in result:
+                    result["page_read"] = True
+                    self._url_cache[url] = result
+                    return result
+            except Exception:
+                pass
+
+        # Page fetch failed or GPT distillation failed — extract keywords
+        # from the URL itself. Honest about what we're doing.
+        url_keywords = self._keywords_from_url(url)
         if user_context:
-            user_msg = f'The writer said: "{user_context}"\n\n'
-        user_msg += f"Here is the content from the linked page:\n---\n{page_text}\n---"
+            # User said something alongside the URL — use that as primary
+            search_query = user_context
+            if url_keywords:
+                search_query = f"{user_context} {url_keywords}"
+            result = {
+                "search_query": search_query,
+                "brief_summary": f"Couldn't read page — searching based on your query and URL",
+                "page_read": False,
+            }
+        elif url_keywords:
+            result = {
+                "search_query": url_keywords,
+                "brief_summary": f"Couldn't read page — searching based on URL keywords: {url_keywords}",
+                "page_read": False,
+            }
+        else:
+            return None
 
-        try:
-            resp = self._client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": _URL_DISTILL_SYSTEM},
-                    {"role": "user", "content": user_msg},
-                ],
-                max_tokens=150,
-                temperature=0.3,
-            )
-            raw = resp.choices[0].message.content.strip()
-            # Strip markdown code fences if present
-            if raw.startswith("```"):
-                raw = re.sub(r'^```\w*\n?', '', raw)
-                raw = re.sub(r'\n?```$', '', raw)
-            result = json.loads(raw)
-
-            # Validate expected keys
-            if "search_query" in result and "brief_summary" in result:
-                self._url_cache[url] = result
-                return result
-        except Exception:
-            pass  # JSON parse or API error — fall back to raw query
-
-        return None
+        self._url_cache[url] = result
+        return result
 
     @staticmethod
     def _fetch_page_text(url: str) -> str | None:
-        """Fetch a URL and extract readable text. Returns None on failure."""
+        """Fetch a URL and extract main content via trafilatura.
+        Returns None if the page can't be fetched or has no extractable content."""
         try:
-            resp = requests.get(url, timeout=10, headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
-                ),
-            })
-            resp.raise_for_status()
-            soup = BeautifulSoup(resp.text, "html.parser")
-            # Remove nav, footer, script, style elements
-            for tag in soup(["nav", "footer", "script", "style", "header", "aside"]):
-                tag.decompose()
-            text = soup.get_text(separator="\n", strip=True)
-            # Collapse multiple blank lines
-            text = re.sub(r'\n{3,}', '\n\n', text)
+            downloaded = trafilatura.fetch_url(url)
+            if not downloaded:
+                return None
+            # favor_precision strips nav/sidebar/footer boilerplate
+            text = trafilatura.extract(
+                downloaded,
+                favor_precision=True,
+                include_links=False,
+                include_comments=False,
+            )
+            if not text:
+                # Retry with recall mode for stubborn layouts
+                text = trafilatura.extract(
+                    downloaded,
+                    favor_recall=True,
+                    include_links=False,
+                    include_comments=False,
+                )
             return text if text else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _keywords_from_url(url: str) -> str | None:
+        """Extract meaningful keywords from URL path segments when page fetch fails."""
+        try:
+            parsed = urlparse(url)
+            # Combine domain name (without TLD) and path segments
+            parts = []
+            # Domain: "granta.com" → "granta"
+            domain_parts = parsed.hostname.split(".") if parsed.hostname else []
+            for p in domain_parts:
+                if p not in ("www", "com", "org", "net", "co", "uk", "io"):
+                    parts.append(p)
+            # Path: "/submissions/poetry-2024" → ["submissions", "poetry", "2024"]
+            for segment in parsed.path.strip("/").split("/"):
+                # Split on hyphens/underscores, drop numeric-only and very short segments
+                for word in re.split(r'[-_]+', segment):
+                    if len(word) > 2 and not word.isdigit():
+                        parts.append(word)
+            return " ".join(parts) if parts else None
         except Exception:
             return None
 
@@ -632,12 +684,18 @@ class NotesSearcher:
 
     def _note_date(self, note: dict) -> "tuple[int, int] | None":
         """Extract (year, month) from a note's created date string."""
-        try:
-            from datetime import datetime
-            dt = datetime.strptime(note["created"], "%A, %d %B %Y at %H:%M:%S")
-            return (dt.year, dt.month)
-        except (ValueError, KeyError):
+        from datetime import datetime
+        created = note.get("created", "")
+        if not created:
             return None
+        # Try canonical format first (Apple Notes), then ISO 8601 fallbacks
+        for fmt in ("%A, %d %B %Y at %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                dt = datetime.strptime(created, fmt)
+                return (dt.year, dt.month)
+            except ValueError:
+                continue
+        return None
 
     def _query_keyword_weight(self, query: str) -> float:
         """Analyze query to determine keyword vs semantic balance.

@@ -156,7 +156,7 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="search_notes",
             description=(
-                "Search through the user's Apple Notes. "
+                "Search through the user's notes (Apple Notes, Obsidian, Bear, and more). "
                 "Supports three modes: 'semantic' (default) finds notes by meaning/theme/vibe; "
                 "'keyword' finds notes containing exact phrases or words — use this when the user "
                 "remembers specific wording; 'hybrid' combines both for best coverage. "
@@ -194,8 +194,8 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="index_status",
             description=(
-                "Check how many Apple Notes are indexed in Writers Room, "
-                "and see the breakdown by folder."
+                "Check how many notes are indexed in Writers Room, "
+                "and see the breakdown by source and folder."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
@@ -272,10 +272,12 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                 search_hint = f'"{first_words}…"'
             else:
                 search_hint = f'"{title}"'
+            source = note.get("source", "apple_notes")
+            source_label = source.replace("_", " ").title()
             output_lines += [
                 f"{'=' * 60}",
                 f"[{rank}] {note['title']}",
-                f"Folder: {note['folder']}  |  Modified: {note['modified']}  |  Relevance: {score:.3f}",
+                f"Source: {source_label}  |  Folder: {note['folder']}  |  Modified: {note['modified']}  |  Relevance: {score:.3f}",
                 f"🔍 Find in Notes: search {search_hint} (folder: {note['folder']})",
                 "",
                 note["content"],
@@ -287,20 +289,28 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     elif name == "index_status":
         try:
             embeddings, metadata = load_index()
-            folders: dict[str, int] = {}
+
+            # Group by source, then folder
+            by_source: dict[str, dict[str, int]] = {}
             for note in metadata:
-                folders[note["folder"]] = folders.get(note["folder"], 0) + 1
+                source = note.get("source", "apple_notes")
+                folder = note["folder"]
+                by_source.setdefault(source, {})
+                by_source[source][folder] = by_source[source].get(folder, 0) + 1
 
             lines = [
                 "Writers Room Index",
                 "=" * 30,
                 f"Total notes indexed: {len(metadata)}",
+                f"Sources: {len(by_source)}",
                 f"Embedding dimensions: {embeddings.shape[1] if len(embeddings) else 'N/A'}",
-                "",
-                "Notes by folder:",
             ]
-            for folder, count in sorted(folders.items(), key=lambda x: -x[1]):
-                lines.append(f"  {folder}: {count} notes")
+            for source, folders in sorted(by_source.items()):
+                source_total = sum(folders.values())
+                source_label = source.replace("_", " ").title()
+                lines.append(f"\n{source_label} ({source_total} notes):")
+                for folder, count in sorted(folders.items(), key=lambda x: -x[1]):
+                    lines.append(f"  {folder}: {count}")
 
             return [types.TextContent(type="text", text="\n".join(lines))]
 

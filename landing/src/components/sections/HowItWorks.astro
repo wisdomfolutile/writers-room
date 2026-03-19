@@ -1,0 +1,87 @@
+---
+const steps = [
+  {
+    icon: `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M8 8h8M8 12h5"/></svg>`,
+    title: "Read",
+    description: "Your notes are pulled straight from Apple Notes. Every folder, every note — no exporting, no copying.",
+  },
+  {
+    icon: `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>`,
+    title: "Understand",
+    description: "AI reads each note and distills its meaning into something searchable — the way you'd remember it, not how you filed it.",
+  },
+  {
+    icon: `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 6h18M3 12h12M3 18h8"/><circle cx="20" cy="15" r="3"/></svg>`,
+    title: "Store",
+    description: "Everything lives in two small files on your Mac. No cloud. No database. Just your machine.",
+  },
+  {
+    icon: `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M11 8v6M8 11h6"/></svg>`,
+    title: "Find",
+    description: "Ask a question in plain English. The right notes surface in milliseconds — and open directly in Apple Notes.",
+  },
+];
+---
+
+<section id="how-it-works" class="section bg-apple-bg">
+  <div class="max-w-5xl mx-auto px-6">
+    <div class="text-center mb-16">
+      <h2 class="fade-up text-3xl md:text-4xl lg:text-5xl font-bold text-apple-text tracking-tight">
+        From notes to answers. In four steps.
+      </h2>
+      <p class="fade-up text-lg text-apple-text-secondary mt-4 max-w-xl mx-auto">
+        No setup wizards. No cloud accounts. No learning curve.
+      </p>
+    </div>
+
+    <div data-pipeline class="relative">
+      <!-- Desktop pipeline: horizontal -->
+      <div class="hidden md:flex items-start justify-between relative">
+        {steps.map((step, i) => (
+          <>
+            <div data-step class="flex flex-col items-center text-center w-48 opacity-0">
+              <div class="w-16 h-16 rounded-2xl bg-apple-bg-alt border border-apple-border/50 flex items-center justify-center text-apple-text mb-4">
+                <Fragment set:html={step.icon} />
+              </div>
+              <h3 class="text-lg font-semibold text-apple-text mb-2">{step.title}</h3>
+              <p class="text-sm text-apple-text-secondary leading-relaxed">{step.description}</p>
+            </div>
+            {i < steps.length - 1 && (
+              <div class="flex-1 flex items-center pt-8">
+                <div
+                  data-line
+                  class="h-[2px] w-full bg-gradient-to-r from-apple-border to-gold/60 origin-left scale-x-0"
+                />
+              </div>
+            )}
+          </>
+        ))}
+      </div>
+
+      <!-- Mobile pipeline: vertical -->
+      <div class="flex md:hidden flex-col gap-8">
+        {steps.map((step, i) => (
+          <>
+            <div data-step class="flex items-start gap-4 opacity-0">
+              <div class="w-14 h-14 shrink-0 rounded-xl bg-apple-bg-alt border border-apple-border/50 flex items-center justify-center text-apple-text">
+                <Fragment set:html={step.icon} />
+              </div>
+              <div>
+                <h3 class="text-lg font-semibold text-apple-text mb-1">{step.title}</h3>
+                <p class="text-sm text-apple-text-secondary leading-relaxed">{step.description}</p>
+              </div>
+            </div>
+            {i < steps.length - 1 && (
+              <div class="ml-7 h-6">
+                <div
+                  data-line
+                  class="w-[2px] h-full bg-gradient-to-b from-apple-border to-gold/60 origin-top scale-y-0"
+                />
+              </div>
+            )}
+          </>
+        ))}
+      </div>
+    </div>
+  </div>
+</section>

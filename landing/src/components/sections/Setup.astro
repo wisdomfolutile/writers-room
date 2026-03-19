@@ -1,0 +1,60 @@
+---
+---
+
+<section id="setup" class="section bg-apple-bg-alt/50">
+  <div class="max-w-3xl mx-auto px-6">
+    <div class="text-center mb-16">
+      <h2 class="fade-up text-3xl md:text-4xl lg:text-5xl font-bold text-apple-text tracking-tight">
+        Five minutes to your first search.
+      </h2>
+      <p class="fade-up text-lg text-apple-text-secondary mt-4 max-w-xl mx-auto">
+        Four commands. One API key. Then every note you've ever written becomes searchable by meaning.
+      </p>
+    </div>
+
+    <div class="fade-up space-y-4">
+      <!-- Step 1 -->
+      <div class="rounded-xl bg-apple-code-bg p-5">
+        <div class="flex items-center gap-2 mb-3">
+          <span class="w-5 h-5 rounded-full bg-gold/20 text-gold text-xs font-bold flex items-center justify-center">1</span>
+          <span class="text-sm text-gray-400">Clone and install</span>
+        </div>
+        <pre class="text-sm text-gray-200 font-mono leading-relaxed overflow-x-auto"><code><span class="text-purple-400">git clone</span> https://github.com/your-username/writers-room.git
+<span class="text-purple-400">cd</span> writers-room && <span class="text-purple-400">pip install</span> -r requirements.txt</code></pre>
+      </div>
+
+      <!-- Step 2 -->
+      <div class="rounded-xl bg-apple-code-bg p-5">
+        <div class="flex items-center gap-2 mb-3">
+          <span class="w-5 h-5 rounded-full bg-gold/20 text-gold text-xs font-bold flex items-center justify-center">2</span>
+          <span class="text-sm text-gray-400">Add your API key</span>
+        </div>
+        <pre class="text-sm text-gray-200 font-mono leading-relaxed overflow-x-auto"><code><span class="text-purple-400">echo</span> <span class="text-green-400">"OPENAI_API_KEY=sk-..."</span> > .env</code></pre>
+      </div>
+
+      <!-- Step 3 -->
+      <div class="rounded-xl bg-apple-code-bg p-5">
+        <div class="flex items-center gap-2 mb-3">
+          <span class="w-5 h-5 rounded-full bg-gold/20 text-gold text-xs font-bold flex items-center justify-center">3</span>
+          <span class="text-sm text-gray-400">Build the index</span>
+        </div>
+        <pre class="text-sm text-gray-200 font-mono leading-relaxed overflow-x-auto"><code><span class="text-purple-400">python3</span> indexer.py  <span class="text-gray-500"># first run indexes all your notes (~5 min)</span></code></pre>
+      </div>
+
+      <!-- Step 4 -->
+      <div class="rounded-xl bg-apple-code-bg p-5">
+        <div class="flex items-center gap-2 mb-3">
+          <span class="w-5 h-5 rounded-full bg-gold/20 text-gold text-xs font-bold flex items-center justify-center">4</span>
+          <span class="text-sm text-gray-400">Launch the app</span>
+        </div>
+        <pre class="text-sm text-gray-200 font-mono leading-relaxed overflow-x-auto"><code><span class="text-purple-400">python3</span> menubar_app.py  <span class="text-gray-500"># or register as MCP server for Claude Code</span></code></pre>
+      </div>
+    </div>
+
+    <div class="fade-up text-center mt-8">
+      <p class="text-sm text-apple-text-secondary">
+        Works with macOS 13+ and Python 3.14+. Full setup guide in the README.
+      </p>
+    </div>
+  </div>
+</section>

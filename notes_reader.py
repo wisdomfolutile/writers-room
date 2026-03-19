@@ -68,8 +68,10 @@ with timeout of 120 seconds
         set batchCount to count of noteTitles
 
         repeat with i from 1 to batchCount
-            set rec to "{ef}" & sep & (item i of noteTitles as string) & sep & ((item i of noteMods) as string) & sep & ((item i of noteCreates) as string) & sep & (item i of noteBodies as string) & noteEnd
-            write rec to fileRef starting at eof as «class utf8»
+            try
+                set rec to "{ef}" & sep & (item i of noteTitles as string) & sep & ((item i of noteMods) as string) & sep & ((item i of noteCreates) as string) & sep & (item i of noteBodies as string) & noteEnd
+                write rec to fileRef starting at eof as «class utf8»
+            end try
         end repeat
     end tell
 end timeout
@@ -117,8 +119,10 @@ tell application "Notes"
                 set noteCreates to creation date of (every note of aFolder whose password protected is false)
                 set noteBodies to body of (every note of aFolder whose password protected is false)
                 repeat with i from 1 to noteCount
-                    set rec to folderName & sep & (item i of noteTitles as string) & sep & ((item i of noteMods) as string) & sep & ((item i of noteCreates) as string) & sep & (item i of noteBodies as string) & noteEnd
-                    write rec to fileRef as «class utf8»
+                    try
+                        set rec to folderName & sep & (item i of noteTitles as string) & sep & ((item i of noteMods) as string) & sep & ((item i of noteCreates) as string) & sep & (item i of noteBodies as string) & noteEnd
+                        write rec to fileRef as «class utf8»
+                    end try
                 end repeat
             end if
         end if
@@ -148,6 +152,60 @@ def _get_folder_note_count(folder_name: str, account_name: str) -> int:
         return int(result.stdout.strip())
     except ValueError:
         return -1
+
+
+def _retry_subchunks(
+    tmp_path: str, folder_name: str, account_name: str,
+    start: int, end: int, depth: int,
+) -> None:
+    """
+    When a chunk fails (usually encoding errors in one note crashing the batch
+    property access), split it in half and retry each half. Recurse until we
+    isolate the bad note(s) or hit single-note granularity.
+    """
+    if start > end:
+        return
+    if depth > 8:  # safety limit — don't recurse forever
+        return
+
+    # At single-note granularity, just try it and move on if it fails
+    if start == end:
+        script = _make_chunk_script(tmp_path, folder_name, account_name, start, end)
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            indent = "      " + "  " * depth
+            print(f"{indent}note {start}: skipped (encoding error)")
+        return
+
+    mid = (start + end) // 2
+    indent = "      " + "  " * depth
+
+    # Try first half
+    script = _make_chunk_script(tmp_path, folder_name, account_name, start, mid)
+    result = subprocess.run(
+        ["osascript", "-e", script],
+        capture_output=True, text=True, timeout=300,
+    )
+    if result.returncode == 0:
+        print(f"{indent}recovered notes {start}-{mid}")
+    else:
+        print(f"{indent}notes {start}-{mid} failed, splitting...")
+        _retry_subchunks(tmp_path, folder_name, account_name, start, mid, depth + 1)
+
+    # Try second half
+    script = _make_chunk_script(tmp_path, folder_name, account_name, mid + 1, end)
+    result = subprocess.run(
+        ["osascript", "-e", script],
+        capture_output=True, text=True, timeout=300,
+    )
+    if result.returncode == 0:
+        print(f"{indent}recovered notes {mid + 1}-{end}")
+    else:
+        print(f"{indent}notes {mid + 1}-{end} failed, splitting...")
+        _retry_subchunks(tmp_path, folder_name, account_name, mid + 1, end, depth + 1)
 
 
 def _read_single_folder(folder_name: str, account_name: str) -> list[dict]:
@@ -197,11 +255,16 @@ def _read_single_folder(folder_name: str, account_name: str) -> list[dict]:
                 text=True,
                 timeout=300,
             )
-            if result.returncode != 0:
-                err = result.stderr.strip()[:120] if result.stderr else "unknown error"
-                print(f"FAILED: {err}")
-                break
-            print("ok")
+            if result.returncode == 0:
+                print("ok")
+                continue
+
+            # Chunk failed — retry with smaller sub-chunks to salvage what we can.
+            # Binary-style split: try halves, then quarters, etc.
+            err = result.stderr.strip()[:120] if result.stderr else "unknown error"
+            print(f"FAILED ({err})")
+            _retry_subchunks(tmp_path, folder_name, account_name, start, end, depth=0)
+
         raw = Path(tmp_path).read_text(encoding="utf-8", errors="replace")
     finally:
         try:

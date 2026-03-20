@@ -1,0 +1,155 @@
+---
+/**
+ * Feature showcase — Apple-style alternating image + text blocks.
+ * Three features with large screenshots as proof.
+ */
+---
+
+<section class="bg-apple-bg py-20 md:py-32">
+  <div class="max-w-6xl mx-auto px-6">
+
+    <!-- Feature 1: Speed -->
+    <div class="fade-up mb-32 md:mb-40">
+      <div class="max-w-3xl mx-auto text-center mb-12">
+        <h2 class="text-[2.5rem] md:text-[3.5rem] font-bold tracking-[-0.03em] leading-[1.05] text-apple-text mb-5">
+          Great things give time.
+        </h2>
+        <p class="text-lg md:text-xl text-apple-text-secondary leading-relaxed max-w-2xl mx-auto">
+          Writers Room performs 20x faster than native search.
+        </p>
+      </div>
+
+      <!-- Performance comparison graph -->
+      <div class="max-w-2xl mx-auto">
+        <div class="rounded-2xl bg-apple-bg-alt p-8 md:p-12">
+          <div class="space-y-8">
+            <!-- Writers Room bar -->
+            <div>
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-sm font-semibold text-apple-text">Writers Room</span>
+                <span class="text-sm font-medium text-apple-text-secondary">~86ms</span>
+              </div>
+              <div class="h-3 rounded-full bg-apple-border/30 overflow-hidden">
+                <div
+                  data-perf-bar="fast"
+                  class="h-full rounded-full bg-apple-text"
+                  style="width: 0%; transition: width 1.2s cubic-bezier(0.16, 1, 0.3, 1);"
+                ></div>
+              </div>
+            </div>
+
+            <!-- Native search bar -->
+            <div>
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-sm font-semibold text-apple-text">Native Search</span>
+                <span class="text-sm font-medium text-apple-text-secondary">~1.7s</span>
+              </div>
+              <div class="h-3 rounded-full bg-apple-border/30 overflow-hidden">
+                <div
+                  data-perf-bar="slow"
+                  class="h-full rounded-full bg-apple-text-secondary/40"
+                  style="width: 0%; transition: width 2s cubic-bezier(0.16, 1, 0.3, 1);"
+                ></div>
+              </div>
+            </div>
+          </div>
+
+          <p class="text-xs text-apple-text-secondary/60 mt-6 text-center">
+            Average query time across 5,800+ notes
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Feature 2: Perfect Recall -->
+    <div class="fade-up mb-32 md:mb-40">
+      <div class="grid md:grid-cols-2 gap-12 md:gap-16 items-center">
+        <div class="order-2 md:order-1">
+          <img
+            src="/hero-4.png"
+            alt="Writers Room — searching by meaning, not keywords"
+            class="w-full rounded-2xl shadow-2xl shadow-black/15"
+          />
+        </div>
+        <div class="order-1 md:order-2">
+          <h2 class="text-[2.5rem] md:text-[3.5rem] font-bold tracking-[-0.03em] leading-[1.05] text-apple-text mb-5">
+            Perfect recall.
+          </h2>
+          <p class="text-lg md:text-xl text-apple-text-secondary leading-relaxed">
+            Humans think in meaning, not keywords. We do too.<br />
+            Can't remember exactly what you wrote? Just type what you remember.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Feature 3: Ask and Receive -->
+    <div class="fade-up mb-32 md:mb-40">
+      <div class="grid md:grid-cols-2 gap-12 md:gap-16 items-center">
+        <div>
+          <h2 class="text-[2.5rem] md:text-[3.5rem] font-bold tracking-[-0.03em] leading-[1.05] text-apple-text mb-5">
+            Ask and receive.
+          </h2>
+          <p class="text-lg md:text-xl text-apple-text-secondary leading-relaxed">
+            Anything from the 2023 grocery list you vaguely
+            remember, to six recipes from 12 years ago.
+          </p>
+        </div>
+        <div>
+          <img
+            src="/hero-1.png"
+            alt="Writers Room — AI synthesis answering a query with note references"
+            class="w-full rounded-2xl shadow-2xl shadow-black/15"
+          />
+        </div>
+      </div>
+    </div>
+
+    <!-- Feature 4: BYOK -->
+    <div class="fade-up">
+      <div class="grid md:grid-cols-2 gap-12 md:gap-16 items-center">
+        <div class="order-2 md:order-1">
+          <img
+            src="/API-legacies.png"
+            alt="Writers Room — Settings with AI provider picker and API key"
+            class="w-full rounded-2xl shadow-2xl shadow-black/15"
+          />
+        </div>
+        <div class="order-1 md:order-2">
+          <h2 class="text-[2.5rem] md:text-[3.5rem] font-bold tracking-[-0.03em] leading-[1.05] text-apple-text mb-5">
+            Your keys. Our ride.
+          </h2>
+          <p class="text-lg md:text-xl text-apple-text-secondary leading-relaxed">
+            Use any AI of your choice as your brain's synthesizer. Try everything from free and stable options like DeepSeek, to something that digs deeper, like Groq, or something consistently succinct, like OpenAI.
+          </p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<script>
+  // Animate performance bars when they scroll into view
+  const observer = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          const fast = entry.target.querySelector('[data-perf-bar="fast"]') as HTMLElement;
+          const slow = entry.target.querySelector('[data-perf-bar="slow"]') as HTMLElement;
+          if (fast) {
+            requestAnimationFrame(() => { fast.style.width = "5%"; });
+          }
+          if (slow) {
+            requestAnimationFrame(() => { slow.style.width = "100%"; });
+          }
+          observer.unobserve(entry.target);
+        }
+      });
+    },
+    { threshold: 0.3 }
+  );
+
+  const perfChart = document.querySelector('[data-perf-bar="fast"]')?.closest('.rounded-2xl');
+  if (perfChart) observer.observe(perfChart);
+</script>

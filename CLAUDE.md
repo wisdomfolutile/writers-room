@@ -203,10 +203,28 @@ claude mcp list
 
 ---
 
+## Branching Strategy
+
+The product is stable on `main` (tagged `v3.0-stable`). Two major features are in development on isolated branches:
+
+| Branch | Purpose | Status |
+|---|---|---|
+| `main` | Stable product — do not commit directly during feature work | Frozen |
+| `feature/byok-providers` | BYOK multi-provider support (synthesis + embeddings) | In progress |
+| `feature/apple-fm` | Apple Foundation Models on-device synthesis + local embeddings | In progress |
+
+**Merge order:** BYOK first (additive, backward-compatible), then Apple FM (changes defaults, rebases on BYOK).
+
+**Bug fixes:** Commit to `main`, cherry-pick into feature branches.
+
+**Restore point:** `git checkout v3.0-stable` in either repo returns to the working product as of 2026-03-19.
+
+The Swift frontend repo (`~/WritersRoom/`) mirrors the same branch names and strategy.
+
+---
+
 ## Planned Work
 
-- **macOS menu bar app** using `rumps` (Python). Planned features:
-  - Search field in dropdown, results shown inline (no browser or terminal)
-  - Clickable footnote per result that opens the note directly in Apple Notes
-  - AppleScript: `tell app "Notes" to show note named "..." in folder "..."`
-  - Or via URL scheme: `notes://` (reliability TBD — investigate before building)
+- **BYOK multi-provider:** Provider registry using OpenAI base_url pattern, keychain key storage, Settings UI picker. See `Writers Room — BYOK Multi-Provider Analysis.md`.
+- **Apple Foundation Models:** On-device synthesis (macOS 26+), local embeddings (nomic-embed-text-v1.5), zero-API-key default experience. See `Writers Room — Commercialization Analysis.md`.
+- **Pro tier:** $24.99 one-time, 1,000-note free limit, topic map, daily digest, smart folders, export.

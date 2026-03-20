@@ -12,9 +12,9 @@
   --color-apple-card: rgba(255, 255, 255, 0.72);
   --color-apple-card-solid: #ffffff;
   --color-teal: #2aa198;
-  --color-gold: #FBBF44;
-  --color-gold-hover: #f5b025;
-  --color-gold-text: #D4A012;
+  --color-gold: #F5C842;
+  --color-gold-hover: #edb928;
+  --color-gold-text: #E8B520;
 
   --font-sans: system-ui, -apple-system, "SF Pro Display", "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
   --font-mono: "SF Mono", SFMono-Regular, ui-monospace, Menlo, Monaco, Consolas, monospace;
@@ -36,8 +36,8 @@ body {
 }
 
 ::selection {
-  background-color: var(--color-gold);
-  color: var(--color-apple-text);
+  background-color: rgba(245, 200, 66, 0.35);
+  color: inherit;
 }
 
 /* ─── Dark mode ─── */
@@ -51,7 +51,7 @@ body {
     --color-apple-border: #424245;
     --color-apple-card: rgba(28, 28, 30, 0.72);
     --color-apple-card-solid: #1c1c1e;
-    --color-gold-text: #FBBF44;
+    --color-gold-text: #F5C842;
   }
 }
 

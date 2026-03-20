@@ -2,23 +2,35 @@
 const faqs = [
   {
     q: "Will it read my iCloud notes too?",
-    a: "Yes — everything that shows up in your Apple Notes app is searchable, including iCloud-synced notes. If you can see it in Notes, Writers Room can find it.",
+    a: "Yes. Everything that shows up in your Apple Notes app is searchable, including iCloud-synced notes. If you can see it in Notes, Writers Room can find it.",
   },
   {
     q: "Do my notes ever leave my Mac?",
-    a: "Your words stay on your machine. The only thing sent externally is a mathematical fingerprint of each note (numbers, not text) for the initial embedding. It can't be reversed back into your writing.",
+    a: "Your words stay on your machine. The only thing sent externally is a numerical fingerprint of each note (numbers, not text) for indexing. It can't be reversed back into your writing.",
   },
   {
     q: "I have thousands of notes. How long does setup take?",
-    a: "About five minutes for 5,800 notes. After that, only new or changed notes are processed — so daily updates take seconds. You can interrupt anytime; progress is saved after each folder.",
+    a: "A few minutes depending on your library size. After that, only new or changed notes are processed. Daily updates take seconds. You can pause anytime; progress is saved after each folder.",
   },
   {
     q: "What about my locked notes?",
-    a: "Password-protected notes are automatically skipped. They're never read, never indexed, never searchable. By design.",
+    a: "Password-protected notes are automatically skipped. Never read, never indexed, never searchable. By design.",
   },
   {
-    q: "Do I need an API key to use it?",
-    a: "The free tier (coming in v3) bundles a local AI model — no API key, no account, no cost. The Pro tier lets you bring your own key from OpenAI, Claude, Gemini, or others for deeper search and synthesis.",
+    q: "Do I need an API key?",
+    a: "Yes. Writers Room uses AI to understand your notes and your searches. You bring your own key from any supported provider. Groq, OpenAI, Mistral, DeepSeek, and others. We walk you through getting one in the app. Takes two minutes.",
+  },
+  {
+    q: "How much does the AI cost to run?",
+    a: "Almost nothing. A heavy user searching 50 times a day spends less than $0.50 a month. Some providers like DeepSeek and Groq are even cheaper.",
+  },
+  {
+    q: "What note apps does it work with?",
+    a: "Apple Notes, Bear, Ulysses, iA Writer, Obsidian, and any folder of markdown files. If you write in more than one place, Writers Room searches across all of them at once.",
+  },
+  {
+    q: "Can it answer questions about my notes?",
+    a: "Yes. Writers Room doesn't just find notes. It reads the results and gives you a conversational summary with links to the actual notes. Like asking a friend who's read everything you've ever written.",
   },
 ];
 ---

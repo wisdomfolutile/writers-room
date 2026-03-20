@@ -8,6 +8,7 @@ Search logic copied verbatim from server.py.
 """
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -117,7 +118,9 @@ class NotesSearcher:
                use_hyde: bool = False, search_depth: int = 50,
                skip_short_notes: bool = True,
                excluded_folders: list[str] | None = None,
-               on_status: "Callable[[str], None] | None" = None) -> list[dict]:
+               on_status: "Callable[[str], None] | None" = None,
+               synthesis_provider: str | None = None,
+               synthesis_api_key: str | None = None) -> list[dict]:
         """
         Search the index. Returns a list of result dicts:
             { title, folder, content, snippet, score }
@@ -141,6 +144,13 @@ class NotesSearcher:
         embeddings = self._embeddings
         metadata   = self._metadata
 
+        # Build synthesis client for HyDE / URL distillation (if BYOK configured)
+        _synth_client = None
+        _synth_model = None
+        if synthesis_provider and synthesis_api_key:
+            from providers import get_synthesis_client
+            _synth_client, _synth_model = get_synthesis_client(synthesis_provider, synthesis_api_key)
+
         # ── URL-aware search ─────────────────────────────────────────
         # If the query contains a URL, fetch the page, distill themes,
         # and use the synthesized query for search.
@@ -155,7 +165,8 @@ class NotesSearcher:
                 '', user_context, flags=re.I,
             ).strip()
 
-            resolved = self._resolve_url(url, user_context, on_status)
+            resolved = self._resolve_url(url, user_context, on_status,
+                                         synth_client=_synth_client, synth_model=_synth_model)
             if resolved:
                 query = resolved["search_query"]
                 brief_summary = resolved["brief_summary"]
@@ -189,7 +200,7 @@ class NotesSearcher:
         # Choose embedding strategy
         def _vec():
             if use_hyde:
-                return self._get_embedding_hyde(embed_query)
+                return self._get_embedding_hyde(embed_query, synth_client=_synth_client, synth_model=_synth_model)
             return self._get_embedding(embed_query)
 
         if is_pure_temporal:
@@ -341,7 +352,8 @@ class NotesSearcher:
     # ------------------------------------------------------------------
 
     def _resolve_url(self, url: str, user_context: str,
-                     on_status: "Callable[[str], None] | None" = None) -> dict | None:
+                     on_status: "Callable[[str], None] | None" = None,
+                     synth_client=None, synth_model=None) -> dict | None:
         """
         Fetch a URL, distill its themes via GPT-4o-mini, return
         {"search_query": "...", "brief_summary": "...", "page_read": bool}.
@@ -371,8 +383,13 @@ class NotesSearcher:
             user_msg += f"Here is the content from the linked page:\n---\n{page_text}\n---"
 
             try:
-                resp = self._client.chat.completions.create(
-                    model="gpt-4o-mini",
+                _chat_client = synth_client or self._client
+                _chat_model = synth_model or "gpt-4o-mini"
+                # If no synth client and no .env fallback, skip distillation
+                if not synth_client and not os.environ.get("OPENAI_API_KEY"):
+                    return None
+                resp = _chat_client.chat.completions.create(
+                    model=_chat_model,
                     messages=[
                         {"role": "system", "content": _URL_DISTILL_SYSTEM},
                         {"role": "user", "content": user_msg},
@@ -766,7 +783,7 @@ class NotesSearcher:
 
         return vec
 
-    def _get_embedding_hyde(self, query: str) -> np.ndarray:
+    def _get_embedding_hyde(self, query: str, synth_client=None, synth_model=None) -> np.ndarray:
         """
         HyDE: ask GPT-4o-mini to write a hypothetical note that answers this query,
         then embed that instead of the raw question.
@@ -782,8 +799,14 @@ class NotesSearcher:
             return self._cache[cache_key]
 
         # Step 1: generate hypothetical note
-        chat = self._client.chat.completions.create(
-            model="gpt-4o-mini",
+        # If no synth client provided (no BYOK key), fall back to regular embedding
+        _chat_client = synth_client or self._client
+        _chat_model = synth_model or "gpt-4o-mini"
+        if not synth_client and not os.environ.get("OPENAI_API_KEY"):
+            # No provider configured and no .env fallback — skip HyDE
+            return self._get_embedding(query)
+        chat = _chat_client.chat.completions.create(
+            model=_chat_model,
             messages=[
                 {"role": "system", "content": _HYDE_SYSTEM},
                 {"role": "user",   "content": query},
@@ -821,11 +844,12 @@ class NotesSearcher:
         "Keep it under 30 words. No quotes, no brackets, no metadata."
     )
 
-    def daily_digest(self) -> dict | None:
+    def daily_digest(self, offset: int = 0) -> dict | None:
         """
         Return an 'On This Day' note for today, or None if nothing qualifies.
-        Result: { year, title, folder, teaser, content, snippet }
-        Cached for the calendar day.
+        Result: { year, title, folder, teaser, content, snippet, total }
+        Accepts offset to cycle through candidates on repeated opens.
+        Cached per (day, offset).
         """
         from datetime import date, datetime
 
@@ -833,45 +857,50 @@ class NotesSearcher:
             return None
 
         today = date.today()
-        cache_key = f"_digest_{today.isoformat()}"
+        candidates_key = f"_digest_candidates_{today.isoformat()}"
 
-        # Check day-level cache (stored on self to survive across calls)
+        # Build sorted candidates once per day, reuse across offsets
+        if hasattr(self, candidates_key):
+            candidates = getattr(self, candidates_key)
+        else:
+            candidates = []
+            for m in self._metadata:
+                try:
+                    dt = datetime.strptime(m["created"], "%A, %d %B %Y at %H:%M:%S")
+                except (ValueError, KeyError):
+                    continue
+
+                if dt.month == today.month and dt.day == today.day and dt.year < today.year:
+                    content_len = len(m.get("content", ""))
+                    if content_len < 60:
+                        continue
+                    candidates.append((dt.year, m, content_len))
+
+            # Score by "interestingness"
+            _WRITER_FOLDERS = {"Ideas", "Writing Ideas", "Poems", "Stories", "My Blog",
+                               "Godly Writing", "Shared Sketch", "Goals"}
+
+            def _score(item):
+                year, m, clen = item
+                age_bonus = (today.year - year) * 10
+                length_score = min(clen, 3000)
+                folder_bonus = 200 if m.get("folder") in _WRITER_FOLDERS else 0
+                return age_bonus + length_score + folder_bonus
+
+            candidates.sort(key=_score, reverse=True)
+            setattr(self, candidates_key, candidates)
+
+        if not candidates:
+            return None
+
+        # Pick the candidate at this offset (wraps around)
+        idx = offset % len(candidates)
+        cache_key = f"_digest_{today.isoformat()}_{idx}"
+
         if hasattr(self, cache_key):
             return getattr(self, cache_key)
 
-        # Find notes created on today's month+day in previous years
-        candidates = []
-        for m in self._metadata:
-            try:
-                dt = datetime.strptime(m["created"], "%A, %d %B %Y at %H:%M:%S")
-            except (ValueError, KeyError):
-                continue
-
-            if dt.month == today.month and dt.day == today.day and dt.year < today.year:
-                content_len = len(m.get("content", ""))
-                # Skip junk: too short, empty, or trivially short
-                if content_len < 60:
-                    continue
-                candidates.append((dt.year, m, content_len))
-
-        if not candidates:
-            setattr(self, cache_key, None)
-            return None
-
-        # Score by "interestingness": prefer longer, more substantive notes
-        # Bonus for certain folders that tend to hold personal writing
-        _WRITER_FOLDERS = {"Ideas", "Writing Ideas", "Poems", "Stories", "My Blog",
-                           "Godly Writing", "Shared Sketch", "Goals"}
-
-        def _score(item):
-            year, m, clen = item
-            age_bonus = (today.year - year) * 10  # older = more nostalgic
-            length_score = min(clen, 3000)  # diminishing returns past 3k
-            folder_bonus = 200 if m.get("folder") in _WRITER_FOLDERS else 0
-            return age_bonus + length_score + folder_bonus
-
-        candidates.sort(key=_score, reverse=True)
-        year, note, _ = candidates[0]
+        year, note, _ = candidates[idx]
 
         # Generate the teaser via GPT-4o-mini
         excerpt = note.get("content", "")[:800]
@@ -887,7 +916,6 @@ class NotesSearcher:
             )
             teaser = chat.choices[0].message.content.strip()
         except Exception:
-            # Fallback: simple template
             teaser = f"On this day in {year}, you wrote \u201c{note['title']}\u201d."
 
         result = {
@@ -897,6 +925,7 @@ class NotesSearcher:
             "teaser": teaser,
             "content": note.get("content", "")[:500],
             "snippet": self._make_snippet(note.get("content", "")),
+            "total": len(candidates),
         }
 
         setattr(self, cache_key, result)

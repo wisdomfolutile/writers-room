@@ -6,9 +6,18 @@ gsap.registerPlugin(ScrollTrigger);
 function initAnimations() {
   // Hero — text entrance
   const heroHeadline = document.querySelector("[data-hero-headline]");
+  const heroEyebrow = document.querySelector("[data-hero-eyebrow]");
   const heroSub = document.querySelector("[data-hero-sub]");
   const heroCta = document.querySelector("[data-hero-cta]");
   const heroSearch = document.querySelector("[data-hero-search]");
+
+  if (heroEyebrow) {
+    gsap.fromTo(
+      heroEyebrow,
+      { opacity: 0, y: 10 },
+      { opacity: 1, y: 0, duration: 0.6, delay: 0.1, ease: "power2.out" },
+    );
+  }
 
   if (heroHeadline) {
     const words = heroHeadline.querySelectorAll(".word");

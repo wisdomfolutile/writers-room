@@ -47,8 +47,14 @@ PROVIDERS = {
 
 
 def get_synthesis_client(provider_id: str, api_key: str):
-    """Return (OpenAI_client, model_name) for the given provider."""
+    """Return (OpenAI_client, model_name) for the given provider.
+
+    Raises ValueError if provider_id is not in the registry.
+    """
     from openai import OpenAI
+
+    if provider_id not in PROVIDERS:
+        raise ValueError(f"Unknown provider: {provider_id!r}")
 
     provider = PROVIDERS[provider_id]
     kwargs = {"api_key": api_key}

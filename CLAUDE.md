@@ -1,230 +1,81 @@
-# Writers Room — Developer Guide
+# Writers Room — Python Backend
 
-A local semantic search tool over a personal Apple Notes library. Notes are read via AppleScript, embedded with OpenAI, and exposed to Claude Code as MCP tools. No database, no server infrastructure — everything runs locally on macOS.
+Semantic search over Apple Notes. Reads via AppleScript, embeds with OpenAI, exposes to Claude Code as MCP tools and to the Swift app via `bridge.py`. Everything local, macOS only.
 
----
-
-## Architecture at a Glance
+## Architecture
 
 ```
-Apple Notes (macOS app)
-        │
-        │  AppleScript (osascript)
-        ▼
-notes_reader.py          ← reads notes, folder-by-folder, batch per folder
-        │
-        │  list of note dicts
-        ▼
-indexer.py               ← embeds with OpenAI, saves to disk (incremental)
-        │
-        │  writes
-        ▼
-index/
-  embeddings.npy         ← float32 array, shape (N, 1536)
-  metadata.json          ← list of N note dicts (full content included)
-        │
-        │  loaded into memory
-        ▼
-server.py                ← MCP server, exposes search_notes / index_status / reload_index
-        │
-        │  stdio (MCP protocol)
-        ▼
-Claude Code
+Apple Notes → notes_reader.py (AppleScript) → indexer.py (OpenAI embeds)
+  → index/embeddings.npy + metadata.json
+  → server.py (MCP tools, stdio)      → Claude Code
+  → bridge.py (JSON-line, stdin/stdout) → Swift app (~/WritersRoom/)
 ```
 
-The index is the source of truth for search. `metadata.json` stores full note content — no secondary lookup needed at query time.
+`metadata.json` stores full note content. `embeddings[i]` ↔ `metadata[i]` — never reorder one without the other.
 
----
+## Critical: AppleScript Constraints
 
-## File Reference
+These are non-obvious and will break things if violated:
 
-### `notes_reader.py`
-Reads notes from Apple Notes via AppleScript. The only file that touches the macOS Notes app.
+1. **Inline specifiers only.** `whose password protected is false` must appear inline per property access. Storing in a variable breaks batch access (O(N) instead of O(1)).
+2. **`id` is not batchable.** Synthetic IDs: `f"{folder}||{title}||{created}"`.
+3. **Temp file output.** AppleScript writes to temp file to avoid O(N^2) string concat.
+4. **Separators:** `~~WRROOM~~` between fields, `~~NOTEEND~~` between notes.
 
-**Key function:** `read_notes(folders=None, verbose=False) → list[dict]`
-- Reads one folder at a time via `_read_single_folder()`
-- Each folder = one AppleScript invocation, one osascript subprocess
-- Folders that fail (locked, auth errors, iCloud sync issues) are silently skipped and returned as empty — no exception raised
-- Returns note dicts with: `id`, `folder`, `title`, `modified`, `created`, `content`
+## Key Files
 
-**Key function:** `get_folder_names() → list[str]`
-- Fast folder list without reading note content
-- Used by `indexer.py` to enumerate all folders before indexing
-
-**Critical AppleScript constraints:**
-
-1. **Batch access requires inline specifiers.** The filter `whose password protected is false` must appear inline in each property access, not stored in a variable first. Storing it in a variable loses the "live specifier" and breaks batch access, forcing O(N) round-trips instead of O(1).
-
-   ```applescript
-   -- ✅ works (inline specifier each time)
-   set noteTitles to name of (every note of aFolder whose password protected is false)
-   set noteBodies to body of (every note of aFolder whose password protected is false)
-
-   -- ❌ breaks batch access
-   set theNotes to every note of aFolder whose password protected is false
-   set noteTitles to name of theNotes  -- forces per-note round-trips
-   ```
-
-2. **`id` is not batchable.** Apple Notes' AppleScript dictionary does not support batch access for the `id` property. Synthetic IDs are built in Python instead: `f"{folder}||{title}||{created}"`. This is stable across reads as long as the title and creation date don't change.
-
-3. **Notes are written to a temp file.** Large bodies would cause O(N²) string concatenation if built up in AppleScript memory. The script writes each note record directly to a temp file using `open for access`.
-
-**Field separator:** `~~WRROOM~~` between fields, `~~NOTEEND~~` between notes. Chosen to be unlikely to appear in note content.
-
-**HTML → text:** Note bodies come from Notes as HTML. `html_to_text()` uses BeautifulSoup with `html.parser` (stdlib, no extra binary). The result is stored in `content`.
-
----
-
-### `indexer.py`
-Builds and updates the local vector index. Designed to be resumable and incremental.
-
-**Usage:**
-```bash
-python3 indexer.py                          # incremental update (all folders)
-python3 indexer.py --force                  # re-embed everything from scratch
-python3 indexer.py --folders "Ideas,Poems"  # only index specific folders
-python3 indexer.py --list-folders           # show all folders with indexed counts
-```
-
-**How incremental updates work:**
-- Loads existing index at start
-- For each note: checks `note_id` (synthetic) + `modified` timestamp against existing index
-- If both match → reuses existing embedding (no API call)
-- If new or modified → re-embeds
-- Saves after each folder — if the process crashes mid-run, progress is preserved
-
-**What gets embedded:**
-```python
-f"Title: {note['title']}\nFolder: {note['folder']}\n\n{note['content']}"
-```
-Title and folder are included to give the embedding richer context. Content is truncated to 24,000 characters (~6k tokens) to stay comfortably under OpenAI's 8,192 token limit for `text-embedding-3-small`.
-
-**Batch size:** 100 notes per OpenAI API call (the API maximum).
-
-**Index files are replaced atomically per folder** — the folder's old entries are removed from the index and new ones appended. This means a partial run produces a valid (though incomplete) index, never a corrupt one.
-
----
-
-### `server.py`
-The MCP server. Exposes three tools to Claude Code over stdio.
-
-**Tools:**
-
-| Tool | Description |
+| File | Role |
 |---|---|
-| `search_notes(query, n_results, mode)` | Search notes. Returns full content. |
-| `index_status()` | Note count and per-folder breakdown. |
-| `reload_index()` | Force reload from disk after re-indexing. |
+| `notes_reader.py` | AppleScript reader. Only file touching macOS Notes. Per-folder, skips locked notes. |
+| `indexer.py` | Incremental embed + index. Saves per-folder (resumable). 24K char truncation. |
+| `server.py` | MCP server: `search_notes(query, n_results, mode)`, `index_status()`, `reload_index()` |
+| `bridge.py` | Swift ↔ Python JSON-line IPC. Long-running subprocess. |
+| `searcher.py` | In-memory cosine similarity + keyword scoring |
+| `synthesizer.py` | LLM streaming synthesis |
+| `providers.py` | BYOK provider registry. Uses OpenAI SDK `base_url` pattern. |
+| `topic_map.py` | UMAP + K-means clustering, mind profile, cross-cluster bridges |
 
-**Search modes:**
+## Search Modes
 
-| Mode | How it works | When to use |
-|---|---|---|
-| `semantic` (default) | OpenAI embedding → cosine similarity | Vague, thematic, feeling-based queries |
-| `keyword` | Exact phrase/word substring match | User remembers specific wording; no API call |
-| `hybrid` | 50/50 blend of normalised semantic + keyword scores | Best general coverage |
+- **semantic** (default): OpenAI embedding → cosine similarity
+- **keyword**: substring match, no API call. No word-boundary awareness ("sin" matches "single").
+- **hybrid**: 50/50 normalized blend. Weighting hardcoded in `server.py`.
 
-**Keyword scoring logic:**
-- Exact phrase match in `title + content` → score `1.0`
-- Partial: fraction of query words found as substrings → score in `[0, 1]`
-- Note: substring match (not word-boundary), so short query words like "of", "my" will match inside other words. Reliable for distinctive phrases; less precise for common words.
+## Index
 
-**In-memory cache:** The index is loaded once on the first tool call and held in `_embeddings` / `_metadata` globals. Call `reload_index` after re-running `indexer.py` to pick up new notes without restarting.
-
-**Search result output** includes a `🔍 Find in Notes:` line per result — a search hint the user can paste into Apple Notes to locate the note directly. Uses the note title if distinctive; falls back to first 6 words of content for generic titles (e.g. "New Recording 18.m4a").
-
----
-
-### `index/`
-
-| File | Description |
-|---|---|
-| `embeddings.npy` | `float32` numpy array, shape `(N, 1536)` — one row per note |
-| `metadata.json` | JSON array of N note dicts, same order as `embeddings.npy` |
-
-**Note dict schema:**
-```json
-{
-  "id": "FolderName||Note Title||Monday, 1 January 2024 at 00:00:00",
-  "folder": "FolderName",
-  "title": "Note Title",
-  "modified": "Monday, 1 January 2024 at 00:00:00",
-  "created": "Monday, 1 January 2024 at 00:00:00",
-  "content": "Plaintext note body (HTML stripped, up to 24,000 chars)"
-}
-```
-
-`embeddings[i]` corresponds to `metadata[i]`. This ordering is maintained by `indexer.py`. Do not sort or reorder `metadata.json` without regenerating `embeddings.npy`.
-
----
+- ~5,844 notes, 88 folders. 2 skipped (auth errors: "2018", "FREELANCE").
+- Files: `index/embeddings.npy` (float32, N×1536) + `index/metadata.json`
+- Incremental: matches on `note_id` + `modified`. Unchanged notes reuse embeddings.
+- Batch size: 100 notes/API call. Atomic replacement per folder.
 
 ## Setup
 
-**Prerequisites:** macOS, Python 3.14+, Apple Notes app, OpenAI API key.
-
 ```bash
-cd ~/claude-writers-room
 pip install -r requirements.txt
-
-# Create .env
 echo "OPENAI_API_KEY=sk-..." > .env
-
-# Build the index (first run takes a while — ~5,800 notes)
-python3 indexer.py
-
-# Register with Claude Code (user-scoped, persists across projects)
+python3 indexer.py                    # first run indexes all
 claude mcp add -s user writers-room -- python3 ~/claude-writers-room/server.py
 ```
 
-**Verify registration:**
-```bash
-claude mcp list
-```
+After re-indexing: call `reload_index` tool or restart Claude Code.
 
-**After re-indexing**, trigger a reload in Claude Code by calling the `reload_index` tool, or restart Claude Code to pick up changes.
-
----
-
-## Known Constraints & Gotchas
-
-**macOS only.** The entire pipeline depends on `osascript`. There is no cross-platform equivalent.
-
-**AppleScript is slow for large folders.** A folder with 500+ notes can take 30–60 seconds to read. This is a Notes/AppleScript limitation, not a code issue. The per-folder approach ensures other folders aren't blocked.
-
-**Locked notes are silently skipped.** The `whose password protected is false` filter excludes them at the AppleScript level. They will never appear in search results.
-
-**Keyword search has no word-boundary awareness.** Querying "sin" will match "single", "sinister", "basin". For precise phrase search, use longer, distinctive phrases.
-
-**Hybrid mode is 50/50 fixed.** The weighting between semantic and keyword scores is not configurable via the tool interface. Change the constants in `call_tool()` in `server.py` if a different balance is needed.
-
-**The index is not real-time.** Notes added or edited after the last `python3 indexer.py` run will not appear in search until re-indexed.
-
-**Content is truncated at 24,000 characters for embedding.** Very long notes (rare) will have their embedding computed on the first 24k chars only. Full content is still stored in `metadata.json` and returned in search results.
-
----
-
-## Branching Strategy
-
-The product is stable on `main` (tagged `v3.0-stable`). Two major features are in development on isolated branches:
+## Branching
 
 | Branch | Purpose | Status |
 |---|---|---|
-| `main` | Stable product — do not commit directly during feature work | Frozen |
-| `feature/byok-providers` | BYOK multi-provider support (synthesis + embeddings) | In progress |
-| `feature/apple-fm` | Apple Foundation Models on-device synthesis + local embeddings | In progress |
+| `main` (tagged `v3.0-stable`) | Stable. Do not commit during feature work. | Frozen |
+| `feature/byok-providers` | Multi-provider BYOK (synthesis + embeddings) | Active |
+| `feature/apple-fm` | Apple Foundation Models on-device | Deferred |
 
-**Merge order:** BYOK first (additive, backward-compatible), then Apple FM (changes defaults, rebases on BYOK).
+Merge order: BYOK first → Apple FM rebases on it. Bug fixes: commit to `main`, cherry-pick.
+Swift repo (`~/WritersRoom/`) mirrors same branches.
 
-**Bug fixes:** Commit to `main`, cherry-pick into feature branches.
+## Planned
 
-**Restore point:** `git checkout v3.0-stable` in either repo returns to the working product as of 2026-03-19.
+- BYOK multi-provider: see `Writers Room — BYOK Multi-Provider Analysis.md`
+- Apple FM on-device: see `Writers Room — Commercialization Analysis.md`
+- Pro tier: $24.99 one-time, 1K free limit, topic map, daily digest, smart folders, export
 
-The Swift frontend repo (`~/WritersRoom/`) mirrors the same branch names and strategy.
+## Content Exclusions
 
----
-
-## Planned Work
-
-- **BYOK multi-provider:** Provider registry using OpenAI base_url pattern, keychain key storage, Settings UI picker. See `Writers Room — BYOK Multi-Provider Analysis.md`.
-- **Apple Foundation Models:** On-device synthesis (macOS 26+), local embeddings (nomic-embed-text-v1.5), zero-API-key default experience. See `Writers Room — Commercialization Analysis.md`.
-- **Pro tier:** $24.99 one-time, 1,000-note free limit, topic map, daily digest, smart folders, export.
+- **Moses** folder: contains writing by other authors, not the user's own work

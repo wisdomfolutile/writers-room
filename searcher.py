@@ -77,6 +77,16 @@ class NotesSearcher:
         # URL distillation cache: url → {"search_query": ..., "brief_summary": ...}
         self._url_cache: dict[str, dict] = {}
 
+        # Precomputed per-note search forms — built once per (re)load.
+        # Index i aligns with metadata[i] and embeddings row i.
+        self._text_lower: list[str] = []       # title + " " + content, lowercased
+        self._title_lower: list[str] = []
+        self._content_len: np.ndarray | None = None   # len(content.strip())
+        self._raw_len: np.ndarray | None = None       # len(content)
+        self._ym: np.ndarray | None = None             # year*12 + (month-1); -1 = unparseable
+        self._folder_lower: np.ndarray | None = None   # lowercased folder per note
+        self._folder_lower_map: dict[str, str] = {}    # lower → original case
+
     # ------------------------------------------------------------------
     # Index management
     # ------------------------------------------------------------------
@@ -87,20 +97,53 @@ class NotesSearcher:
             raise RuntimeError(
                 f"Index not found at {EMBEDDINGS_FILE}. Run: python3 indexer.py"
             )
-        self._embeddings = np.load(EMBEDDINGS_FILE)
-        with open(METADATA_FILE, encoding='utf-8') as f:
-            self._metadata = json.load(f)
+        self._load_from_disk()
         self._client = OpenAI()
 
     def reload_index(self) -> int:
         """Re-load from disk after re-indexing. Returns new note count."""
-        self._embeddings = np.load(EMBEDDINGS_FILE)
-        with open(METADATA_FILE, encoding='utf-8') as f:
-            self._metadata = json.load(f)
+        self._load_from_disk()
         # Clear embedding cache — stale after re-index (content may have changed)
         self._cache.clear()
         self._cache_order.clear()
         return len(self._metadata)
+
+    def _load_from_disk(self) -> None:
+        raw = np.load(EMBEDDINGS_FILE).astype(np.float32, copy=False)
+        with open(METADATA_FILE, encoding='utf-8') as f:
+            self._metadata = json.load(f)
+        # Pre-normalize rows so cosine similarity is a single matvec per query
+        # (re-normalizing the 63MB matrix per query cost ~18ms; now ~1.4ms).
+        norms = np.linalg.norm(raw, axis=1, keepdims=True) + 1e-10
+        self._embeddings = raw / norms
+        self._build_accelerator()
+
+    def _build_accelerator(self) -> None:
+        """Precompute per-note search forms so no per-note string work
+        (lowercasing, date parsing, len) happens at query time."""
+        meta = self._metadata
+        self._title_lower = [n["title"].lower() for n in meta]
+        self._text_lower = [
+            tl + " " + n["content"].lower()
+            for tl, n in zip(self._title_lower, meta)
+        ]
+        self._content_len = np.array(
+            [len(n["content"].strip()) for n in meta], dtype=np.int64
+        )
+        self._raw_len = np.array([len(n["content"]) for n in meta], dtype=np.int64)
+
+        ym = np.full(len(meta), -1, dtype=np.int64)
+        for i, n in enumerate(meta):
+            d = self._note_date(n)
+            if d is not None:
+                ym[i] = d[0] * 12 + (d[1] - 1)
+        self._ym = ym
+
+        folder_lower = [n["folder"].lower() for n in meta]
+        self._folder_lower = np.array(folder_lower)
+        self._folder_lower_map = {
+            fl: n["folder"] for fl, n in zip(folder_lower, meta)
+        }
 
     @property
     def is_loaded(self) -> bool:
@@ -109,6 +152,15 @@ class NotesSearcher:
     @property
     def note_count(self) -> int:
         return len(self._metadata) if self._metadata else 0
+
+    @property
+    def metadata(self) -> list[dict]:
+        """Read-only view of indexed note metadata (for status reporting)."""
+        return self._metadata or []
+
+    @property
+    def embedding_dims(self) -> int:
+        return self._embeddings.shape[1] if self._embeddings is not None else 0
 
     # ------------------------------------------------------------------
     # Public search
@@ -207,21 +259,25 @@ class NotesSearcher:
             # No semantic content to embed — rank by note substance instead.
             # Score = log(content_length) normalized, so longer/richer notes
             # surface first. The temporal filter below will gate to the date range.
-            lengths = np.array([len(note["content"]) for note in metadata], dtype=np.float32)
-            scores = np.log1p(lengths)
+            scores = np.log1p(self._raw_len.astype(np.float32))
             s_max = scores.max()
             if s_max > 0:
                 scores /= s_max  # normalize to [0, 1]
 
         elif mode == "keyword":
-            scores = np.array([self._keyword_score(embed_query, note) for note in metadata])
+            scores = self._keyword_scores(embed_query)
 
         elif mode == "hybrid":
-            query_vec = _vec()
+            # Overlap: keyword scoring runs while the embedding round-trip
+            # is in flight (the network call dominates hybrid latency).
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                vec_future = pool.submit(_vec)
+                kw_scores = self._keyword_scores(embed_query)
+                query_vec = vec_future.result()
             sem_scores = self._cosine_similarity(query_vec, embeddings)
             s_min, s_max = sem_scores.min(), sem_scores.max()
             sem_norm = (sem_scores - s_min) / (s_max - s_min + 1e-10)
-            kw_scores = np.array([self._keyword_score(embed_query, note) for note in metadata])
 
             # Smart weighting: query analysis determines a base keyword weight,
             # then search_depth shifts it — low depth → keyword-heavy, high → semantic.
@@ -238,51 +294,40 @@ class NotesSearcher:
         # ── Excluded folders ─────────────────────────────────────────
         excluded = {f.lower() for f in (excluded_folders or [])}
         if excluded:
-            for i, note in enumerate(metadata):
-                if note["folder"].lower() in excluded:
-                    scores[i] = -1.0
+            scores[np.isin(self._folder_lower, list(excluded))] = -1.0
 
         # ── Folder filter (query-detected) ──────────────────────────
         if folder_match:
-            target = folder_match["folder"].lower()
-            for i, note in enumerate(metadata):
-                if note["folder"].lower() != target:
-                    scores[i] = -1.0  # hard exclude
+            scores[self._folder_lower != folder_match["folder"].lower()] = -1.0
 
         # ── Date-aware filtering ────────────────────────────────────
         # Applied before content quality gate so temporal exclusion is the
         # hard gate and quality is the soft ranking signal (avoids compounding
         # penalties that silently drop short-but-in-range notes).
+        # Dates were parsed once at load into year*12+(month-1); -1 = no date.
         if temporal:
-            sy, sm = temporal["start_year"], temporal["start_month"]
-            ey, em = temporal["end_year"], temporal["end_month"]
-            for i, note in enumerate(metadata):
-                nd = self._note_date(note)
-                if nd is None:
-                    scores[i] *= 0.05
-                    continue
-                ny, nm = nd
-                # Compare as (year, month) tuples
-                note_ym = (ny, nm)
-                # Handle ranges that wrap around year boundary (e.g. winter: Dec-Feb)
-                if (sy, sm) <= (ey, em):
-                    in_range = (sy, sm) <= note_ym <= (ey, em)
-                else:
-                    in_range = note_ym >= (sy, sm) or note_ym <= (ey, em)
-                if not in_range:
-                    scores[i] *= 0.05
+            s_ym = temporal["start_year"] * 12 + (temporal["start_month"] - 1)
+            e_ym = temporal["end_year"] * 12 + (temporal["end_month"] - 1)
+            ym = self._ym
+            if s_ym <= e_ym:
+                in_range = (ym >= s_ym) & (ym <= e_ym)
+            else:
+                # Range wraps the year boundary (e.g. winter: Dec–Feb)
+                in_range = (ym >= s_ym) | (ym <= e_ym)
+            in_range &= ym >= 0  # undated notes always penalized
+            scores[~in_range] *= 0.05
 
         # ── Content quality gate ────────────────────────────────────
         if skip_short_notes:
-            for i, note in enumerate(metadata):
-                clen = len(note["content"].strip())
-                if clen < 10:
-                    scores[i] *= 0.01   # near-zero: "1", phone numbers, empty
-                elif clen < 30:
-                    scores[i] *= 0.15   # heavy penalty: single-line stubs
-                elif clen < 60:
-                    scores[i] *= 0.5    # moderate penalty: very short notes
+            clen = self._content_len
+            scores[clen < 10] *= 0.01    # near-zero: "1", phone numbers, empty
+            scores[(clen >= 10) & (clen < 30)] *= 0.15   # single-line stubs
+            scores[(clen >= 30) & (clen < 60)] *= 0.5    # very short notes
 
+        # Full argsort, not argpartition: partitioning selects a different
+        # arbitrary subset when thousands of notes tie at the same score
+        # (common for keyword 1.0 hits), changing which results surface.
+        # The full sort costs ~0.6ms — preserving exact ordering wins.
         top_indices = np.argsort(scores)[::-1][:n]
 
         # ── Score floor ─────────────────────────────────────────────
@@ -302,6 +347,8 @@ class NotesSearcher:
                 "content":  note["content"],
                 "snippet":  self._make_snippet(note["content"]),
                 "score":    score,
+                "modified": note.get("modified", ""),
+                "created":  note.get("created", ""),
             }
             if brief_summary:
                 result["brief_summary"] = brief_summary
@@ -314,38 +361,38 @@ class NotesSearcher:
     # ------------------------------------------------------------------
 
     def _cosine_similarity(self, query_vec: np.ndarray, matrix: np.ndarray) -> np.ndarray:
+        # Matrix rows are pre-normalized at load — similarity is one matvec.
         query_norm = query_vec / (np.linalg.norm(query_vec) + 1e-10)
-        norms  = np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-10
-        normed = matrix / norms
-        return normed @ query_norm
+        return matrix @ query_norm
 
-    def _keyword_score(self, query: str, note: dict) -> float:
-        content_lower = note["content"].lower()
-        title_lower = note["title"].lower()
-        text = title_lower + " " + content_lower
+    def _keyword_scores(self, query: str) -> np.ndarray:
+        """Keyword scores for all notes, using text lowercased once at load."""
         q = query.lower()
-
-        # Exact phrase match in full text
-        if q in text:
-            return 1.0
-
         words = [w for w in q.split() if len(w) > 1]  # drop single chars
-        if not words:
-            return 0.0
 
-        hits = sum(1 for w in words if w in text)
-        base = hits / len(words)
+        scores = np.zeros(len(self._text_lower), dtype=np.float32)
+        for i, (text, title_lower) in enumerate(zip(self._text_lower, self._title_lower)):
+            # Exact phrase match in full text
+            if q in text:
+                scores[i] = 1.0
+                continue
+            if not words:
+                continue
 
-        # Conjunction bonus: ALL words present → strong signal of relevance
-        if hits == len(words) and len(words) >= 2:
-            base = min(1.0, base + 0.3)
+            hits = sum(1 for w in words if w in text)
+            base = hits / len(words)
 
-        # Title match bonus: words in title are high-signal
-        title_hits = sum(1 for w in words if w in title_lower)
-        if title_hits > 0:
-            base = min(1.0, base + 0.15 * title_hits / len(words))
+            # Conjunction bonus: ALL words present → strong signal of relevance
+            if hits == len(words) and len(words) >= 2:
+                base = min(1.0, base + 0.3)
 
-        return base
+            # Title match bonus: words in title are high-signal
+            title_hits = sum(1 for w in words if w in title_lower)
+            if title_hits > 0:
+                base = min(1.0, base + 0.15 * title_hits / len(words))
+
+            scores[i] = base
+        return scores
 
     # ------------------------------------------------------------------
     # URL resolution
@@ -504,8 +551,7 @@ class NotesSearcher:
         Detect a folder reference in the query and match it to a real folder.
         Returns {"folder": "PRODUCTS", "clean_query": "..."} or None.
         """
-        all_folders = list({n["folder"] for n in metadata})
-        folder_lower_map = {f.lower(): f for f in all_folders}
+        folder_lower_map = self._folder_lower_map
 
         for pat in self._FOLDER_PATTERNS:
             m = pat.search(query)

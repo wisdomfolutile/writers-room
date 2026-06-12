@@ -18,7 +18,7 @@ semantic/hybrid (network-bound floor), effectively instant (<150ms) for keyword.
 | Short-note penalty | 0.02 s | ~0 (precomputed) | `applyShortNotePenalty` |
 | Embedding API round-trip | 0.3–0.6 s | unchanged (floor); −0.1–0.3 s on first search via pre-warm | `callEmbeddingAPI` |
 | Debounce before search fires | 0.4 s (semantic/hybrid) | 0.25–0.3 s | `SearchMode.debounceNanoseconds` |
-| Synthesis prompt size | 8 × 3,000 chars (~6–7K tokens) | ~2.5K tokens → faster first token, ~60% cheaper | `NativeSynthesisEngine` |
+| Synthesis prompt size | ~2.3K tokens typical, ~3.4K p90 (cap 8 × 3,000 chars) | unchanged typical; query-aware excerpts for the >3K-char tail | `NativeSynthesisEngine` |
 | Semantic matrix math | already optimal (pre-normalized + BLAS sgemv) | — | `NativeEmbeddingStore` |
 
 **The smoking gun is keyword scoring.** `keywordScore` lowercases the full content of every
@@ -78,9 +78,20 @@ Hybrid loses the same 2.1 s. Temporal queries lose another ~0.25 s.
 7. **Overlap work with the embedding call.** In hybrid mode, compute keyword scores
    concurrently with the embedding request (`async let`). When HyDE is on, start the raw
    query embedding *during* HyDE generation, not after (saves a full embed round-trip).
-8. **Trim the synthesis prompt.** Currently 8 results × 3,000 chars (~6–7K tokens). Use top
-   3 at 2,000 chars + remaining 5 at 800 (~2.5K tokens). Faster time-to-first-token and
-   ~60% cheaper, with negligible quality loss — synthesis is 2–4 sentences.
+8. **Synthesis prompt: keep the 3,000-char cap; fix truncation for long notes instead.**
+   History check: the cap grew 1,500 → 3,000 deliberately (commit `8b7880a`, HyDE v2) so
+   synthesis sees whole notes — at 3,000 chars, 89% of notes fit fully (88% measured today),
+   costed at +$0.75/mo. The data vindicates it: typical top-8 prompt is ~2.3K tokens
+   (p90 ~3.4K), not a problem. **Do not cut the cap** — that would trade real answer quality
+   for ~100–200 ms of prefill.
+   Two surgical improvements instead:
+   - For the ~12% of notes *longer* than 3,000 chars, `prefix(3000)` blindly takes the head —
+     if the relevant passage is past char 3,000, the synthesizer never sees it. Replace with
+     a query-aware window (center the excerpt on the first query-term hit; fall back to head).
+     Same prompt size, strictly better answers.
+   - Add a total-prompt budget (~4K tokens) that only binds in the rare all-long-notes worst
+     case (above p90), trimming the lowest-ranked results first. Protects tail latency without
+     touching typical behavior.
 9. **Cache the Keychain API key in memory** (invalidate on settings change). It's read twice
    per search (`performSearch` + `startSynthesis`) on the main actor today.
 10. **Tune debounce:** semantic/hybrid 400 ms → 280 ms. Keep 150 ms for keyword. Enter
@@ -89,29 +100,54 @@ Hybrid loses the same 2.1 s. Temporal queries lose another ~0.25 s.
 **Expected:** semantic search time-to-results ~0.8–1.0 s → ~0.5–0.7 s; synthesis text starts
 appearing ~0.5–1 s sooner.
 
-### Phase 3 — MCP server parity (`server.py`)
+### Phase 3 — MCP server: consolidate, don't duplicate (`server.py`)
 
-11. **Pre-normalize embeddings at load** (then similarity = single matvec). 18 ms → 1.4 ms.
-12. **Preload the index at startup** in `main()` instead of lazily on first search.
-13. **Add the LRU query-embedding cache** (port from `searcher.py`).
-14. **Precompute lowercased text + (year, month) per note at load** for keyword/temporal.
-15. **`argpartition` instead of full `argsort`** for top-n.
-16. In hybrid mode, run keyword scoring in a thread while the embedding call is in flight.
+`server.py` reimplements search with a *drifted, weaker* copy of the logic: an older
+`keyword_score` (no conjunction/title bonuses), no LRU embedding cache, no temporal or folder
+understanding, and a lazy first-search index load. `searcher.py` already has the good
+implementation. This is the "less code, better performance" case:
 
-Apply 11/14/15 to `searcher.py` too — it shares the logic and still backs the topic map and
-any Python-side tooling.
+11. **Make `server.py` delegate to `NotesSearcher` from `searcher.py`** instead of carrying
+    its own scoring/URL code. Deletes ~150 lines of duplicate logic and gives MCP users the
+    same features the app has (temporal queries, folder detection, LRU cache, smart hybrid
+    weighting) — features gained, not lost.
+12. **Optimize the shared `NotesSearcher` core** (benefits app tooling, topic map, and MCP):
+    - Pre-normalize embeddings at load → similarity is a single matvec (18 ms → 1.4 ms).
+    - Precompute lowercased text, content lengths, and (year, month) per note at load.
+    - `argpartition` instead of full `argsort` for top-n.
+13. **Preload the index at MCP server startup** instead of lazily on first search (−150 ms).
+14. In hybrid mode, run keyword scoring in a thread while the embedding call is in flight.
 
 ### Phase 4 — Instrumentation (keep it fast)
 
-17. **Add `os_signpost` timing around each search stage** in the app (parse → embed →
+15. **Add `os_signpost` timing around each search stage** in the app (parse → embed →
     score → filter → render; synthesis TTFT) and a debug-log line per search with the
     breakdown. The 2-second keyword regression survived because nothing measured per-stage
     latency. One log line per search makes the next regression visible immediately.
 
+## Feature preservation — explicit guarantees
+
+No product feature is removed or degraded. These are the differentiators of the search and
+every fix here is a faster implementation of the same behavior:
+
+- **Temporal queries** ("December 2023", "last summer") — same filter semantics, dates parsed
+  once at load instead of 10K× per query.
+- **Folder recognition in the query** ("in my Ideas folder") — unchanged; known-folder sets
+  precomputed instead of rebuilt per search.
+- **Source filters, excluded folders, short-note quality gate** — same rules, precomputed
+  inputs.
+- **Keyword/hybrid scoring** — byte-level rewrite verified score-identical on the real index
+  (checksum 3557.893 both implementations).
+- **HyDE and URL-aware search** — kept; they only get faster via overlapped network calls.
+- **Synthesis context coverage** — the 3,000-char/note cap stays (deliberate quality decision,
+  commit `8b7880a`); long-note excerpting *improves*.
+
+The only deletions are genuine redundancies: dead code (the no-op `vDSP_svesq` call) and
+`server.py`'s drifted duplicate of search logic — replaced by the strictly-better shared
+implementation, which *adds* features for MCP users.
+
 ## What this does NOT change
 
-- Scoring behavior. Every fix is a faster implementation of the same math — the byte-level
-  keyword rewrite was verified score-identical on the real index.
 - The `embeddings[i] ↔ metadata[i]` invariant. Precomputed arrays are built in the same load
   pass and live/die with the metadata array.
 - The ~300–500 ms embedding API floor for semantic search. Going below that means local
@@ -125,7 +161,7 @@ any Python-side tooling.
 | Hybrid | ~2.7–3.2 s | **~0.5–0.8 s** |
 | Semantic | ~0.8–1.1 s | **~0.5–0.7 s** |
 | Temporal variants | +0.25 s on top | +~0 |
-| Synthesis first text | ~1.5–2.5 s after results | **~0.8–1.2 s** |
+| Synthesis first text | ~1–2 s after results | **−0.2–0.5 s** (pre-warm + overlap; prompt size unchanged) |
 | MCP first search | +150 ms cold | preloaded |
 
 ## Sequencing
